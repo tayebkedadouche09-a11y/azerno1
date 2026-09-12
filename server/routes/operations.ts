@@ -14,7 +14,20 @@ async function nextNumber(client: import('pg').PoolClient, key: string, prefix: 
 
 router.get('/deliveries', async (_req, res, next) => {
   try {
-    const result = await query(`SELECT d.*, o.number AS order_number, c.name AS customer_name FROM deliveries d JOIN orders o ON o.id=d.order_id LEFT JOIN customers c ON c.id=o.customer_id ORDER BY d.delivery_date DESC, d.created_at DESC`);
+    const result = await query(`
+      SELECT d.*, o.number AS order_number, c.name AS customer_name,
+        COALESCE((SELECT json_agg(json_build_object(
+          'variantId', di.variant_id,
+          'quantity', di.quantity,
+          'designation', COALESCE(v.name, 'Produit'),
+          'unit', COALESCE(v.unit, 'u')
+        ) ORDER BY di.id) FROM delivery_items di
+        LEFT JOIN product_variants v ON v.id=di.variant_id
+        WHERE di.delivery_id=d.id), '[]'::json) AS items
+      FROM deliveries d
+      JOIN orders o ON o.id=d.order_id
+      LEFT JOIN customers c ON c.id=o.customer_id
+      ORDER BY d.delivery_date DESC, d.created_at DESC`);
     res.json({ items: result.rows });
   } catch (e) { next(e); }
 });
@@ -67,13 +80,8 @@ router.post('/deliveries', requireRole('owner','manager','worker'), async (req, 
         );
       }
 
-      // Determine completion from the complete order, not only from the lines
-      // included in this delivery. This prevents a partial delivery from being
-      // incorrectly marked as fully delivered when other order lines are omitted.
       const remainingItems = await client.query<{ count: string }>(
-        `SELECT COUNT(*)::text AS count
-         FROM order_items
-         WHERE order_id=$1 AND delivered_quantity < quantity`,
+        `SELECT COUNT(*)::text AS count FROM order_items WHERE order_id=$1 AND delivered_quantity < quantity`,
         [orderId]
       );
       const allDelivered = Number(remainingItems.rows[0]?.count ?? 0) === 0;
@@ -91,7 +99,21 @@ router.post('/deliveries', requireRole('owner','manager','worker'), async (req, 
 
 router.get('/invoices', async (_req, res, next) => {
   try {
-    const result = await query(`SELECT i.*, c.name AS customer_name, o.number AS order_number FROM invoices i LEFT JOIN customers c ON c.id=i.customer_id LEFT JOIN orders o ON o.id=i.order_id ORDER BY i.invoice_date DESC, i.created_at DESC`);
+    const result = await query(`
+      SELECT i.*, c.name AS customer_name, o.number AS order_number,
+        COALESCE((SELECT json_agg(json_build_object(
+          'variantId', ii.variant_id,
+          'designation', ii.description,
+          'quantity', ii.quantity,
+          'unitPrice', ii.unit_price,
+          'unitCost', ii.unit_cost,
+          'discount', ii.discount,
+          'total', (ii.quantity * ii.unit_price) - ii.discount
+        ) ORDER BY ii.id) FROM invoice_items ii WHERE ii.invoice_id=i.id), '[]'::json) AS items
+      FROM invoices i
+      LEFT JOIN customers c ON c.id=i.customer_id
+      LEFT JOIN orders o ON o.id=i.order_id
+      ORDER BY i.invoice_date DESC, i.created_at DESC`);
     res.json({ items: result.rows });
   } catch(e) { next(e); }
 });
