@@ -4,8 +4,9 @@ import { api } from './api';
 import { offlineQueue, type QueueOperation } from './offlineQueue';
 
 export type CoreData = Awaited<ReturnType<typeof loadCoreData>>;
-
+const PULL_CURSOR_KEY = 'azrnou_sync_pull_cursor_v1';
 let flushInFlight: Promise<{ applied: number; rejected: number; remaining: number }> | null = null;
+let pullInFlight: Promise<number> | null = null;
 
 export async function loadCoreData() {
   const [customers, products, orders] = await Promise.all([
@@ -47,15 +48,9 @@ function pendingOperations(): QueueOperation[] {
 }
 
 async function flushQueueInternal() {
-  if (!navigator.onLine) {
-    return { applied: 0, rejected: 0, remaining: offlineQueue.list().length };
-  }
-
+  if (!navigator.onLine) return { applied: 0, rejected: 0, remaining: offlineQueue.list().length };
   const pending = pendingOperations();
-  if (!pending.length) {
-    return { applied: 0, rejected: 0, remaining: 0 };
-  }
-
+  if (!pending.length) return { applied: 0, rejected: 0, remaining: 0 };
   const deviceId = getDeviceId();
   let applied = 0;
   let rejected = 0;
@@ -64,42 +59,30 @@ async function flushQueueInternal() {
     offlineQueue.update(operation.id, { status: 'syncing' });
     try {
       if (operation.entity === 'expense' && operation.action === 'create') {
-        await api.createExpense({
-          ...(operation.payload as Record<string, unknown>),
-          idempotencyKey: operation.id,
-        });
+        await api.createExpense({ ...(operation.payload as Record<string, unknown>), idempotencyKey: operation.id });
         offlineQueue.remove(operation.id);
         applied++;
         continue;
       }
-
+      const payload = operation.payload as { id?: string } | null;
       const result = await api.syncPush(deviceId, [{
         operationId: operation.id,
         entityType: operation.entity,
         operationType: operation.action as 'create' | 'update' | 'delete',
-        entityId: (operation.payload as { id?: string } | null)?.id ?? null,
+        entityId: payload?.id ?? null,
         payload: operation.payload,
       }]);
-
       if (result.accepted.includes(operation.id) || result.duplicates.includes(operation.id)) {
         offlineQueue.remove(operation.id);
         applied++;
         continue;
       }
-
       const failure = result.rejected.find(item => item.operationId === operation.id);
       if (failure) {
-        offlineQueue.update(operation.id, {
-          status: 'failed',
-          attempts: operation.attempts + 1,
-          lastError: failure.reason,
-        });
+        offlineQueue.update(operation.id, { status: 'failed', attempts: operation.attempts + 1, lastError: failure.reason });
         rejected++;
-        // Do not let a dependency/conflict failure cause unrelated later operations
-        // to mutate the server out of order. The failed item remains visible for recovery.
         break;
       }
-
       offlineQueue.update(operation.id, { status: 'pending' });
       break;
     } catch (error) {
@@ -111,22 +94,56 @@ async function flushQueueInternal() {
       break;
     }
   }
-
   if (applied) await refreshCoreData();
   return { applied, rejected, remaining: offlineQueue.list().length };
 }
 
 export async function flushCoreCreateQueue() {
   if (flushInFlight) return flushInFlight;
-  flushInFlight = flushQueueInternal().finally(() => {
-    flushInFlight = null;
-  });
+  flushInFlight = flushQueueInternal().finally(() => { flushInFlight = null; });
   return flushInFlight;
+}
+
+function getPullCursor() {
+  return localStorage.getItem(PULL_CURSOR_KEY) ?? '1970-01-01T00:00:00.000Z';
+}
+
+function setPullCursor(value: string) {
+  localStorage.setItem(PULL_CURSOR_KEY, value);
+}
+
+export async function pullRemoteChanges() {
+  if (!navigator.onLine) return 0;
+  if (pullInFlight) return pullInFlight;
+  pullInFlight = (async () => {
+    let cursor = getPullCursor();
+    let changed = 0;
+    try {
+      // Pull is used as a change detector. Core records are then reloaded from the
+      // PostgreSQL API, keeping IndexedDB/localStorage a cache rather than a source of truth.
+      for (let page = 0; page < 20; page++) {
+        const result = await api.syncPull(getDeviceId(), cursor);
+        changed += result.items.length;
+        cursor = result.nextSince || cursor;
+        setPullCursor(cursor);
+        if (!result.items.length || result.items.length < 500) break;
+      }
+      if (changed) {
+        await dataRepository.clearCache();
+        await refreshCoreData();
+      }
+      return changed;
+    } finally {
+      pullInFlight = null;
+    }
+  })();
+  return pullInFlight;
 }
 
 export function startCoreDataSync(onRefresh?: () => void) {
   const handleOnline = async () => {
     await flushCoreCreateQueue();
+    await pullRemoteChanges();
     await refreshCoreData();
     onRefresh?.();
   };
