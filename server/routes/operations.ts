@@ -49,13 +49,17 @@ router.post('/deliveries', requireRole('owner','manager','worker'), async (req, 
         [number, orderId, req.body?.deliveryDate ?? new Date().toISOString().slice(0,10), req.body?.deliveryPerson ?? null, req.body?.address ?? null, req.body?.notes ?? null, req.user!.id]
       );
 
+      const seenVariants = new Set<string>();
       for (const item of items) {
+        const variantId = String(item.variantId ?? '');
         const qty = Number(item.quantity);
-        if (!item.variantId || !Number.isFinite(qty) || qty <= 0) throw new Error('Invalid delivery quantity');
+        if (!variantId || !Number.isFinite(qty) || qty <= 0) throw new Error('Invalid delivery quantity');
+        if (seenVariants.has(variantId)) throw new Error(`Duplicate delivery line for variant ${variantId}`);
+        seenVariants.add(variantId);
 
         const oi = await client.query(
           `SELECT id, quantity, delivered_quantity FROM order_items WHERE order_id=$1 AND variant_id=$2 FOR UPDATE`,
-          [orderId, item.variantId]
+          [orderId, variantId]
         );
         if (!oi.rows[0]) throw new Error('Variant is not part of the order');
 
@@ -64,19 +68,19 @@ router.post('/deliveries', requireRole('owner','manager','worker'), async (req, 
 
         const stock = await client.query(
           `SELECT quantity,reserved_quantity FROM inventory_balances WHERE variant_id=$1 FOR UPDATE`,
-          [item.variantId]
+          [variantId]
         );
         if (!stock.rows[0] || Number(stock.rows[0].quantity) < qty || Number(stock.rows[0].reserved_quantity) < qty) {
           throw new Error('Insufficient reserved stock for delivery');
         }
 
-        await client.query(`INSERT INTO delivery_items(delivery_id,variant_id,quantity) VALUES($1,$2,$3)`, [delivery.rows[0].id, item.variantId, qty]);
+        await client.query(`INSERT INTO delivery_items(delivery_id,variant_id,quantity) VALUES($1,$2,$3)`, [delivery.rows[0].id, variantId, qty]);
         await client.query(`UPDATE order_items SET delivered_quantity=delivered_quantity+$2 WHERE id=$1`, [oi.rows[0].id, qty]);
-        await client.query(`UPDATE inventory_balances SET quantity=quantity-$2,reserved_quantity=reserved_quantity-$2,updated_at=NOW() WHERE variant_id=$1`, [item.variantId, qty]);
+        await client.query(`UPDATE inventory_balances SET quantity=quantity-$2,reserved_quantity=reserved_quantity-$2,updated_at=NOW() WHERE variant_id=$1`, [variantId, qty]);
         await client.query(
           `INSERT INTO inventory_movements(variant_id,movement_type,quantity,reference_type,reference_id,idempotency_key,created_by)
            VALUES($1,'delivery',$2,'delivery',$3,$4,$5)`,
-          [item.variantId, -qty, delivery.rows[0].id, `delivery:${delivery.rows[0].id}:${item.variantId}`, req.user!.id]
+          [variantId, -qty, delivery.rows[0].id, `delivery:${delivery.rows[0].id}:${variantId}`, req.user!.id]
         );
       }
 
