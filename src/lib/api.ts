@@ -20,6 +20,7 @@ export const api={
  invoices:()=>request<ApiList<Record<string,unknown>>>('/operations/invoices'),
  expenses:()=>request<ApiList<Record<string,unknown>>>('/finance/expenses'),
  purchases:()=>request<ApiList<Record<string,unknown>>>('/finance/purchases'),
+ cashSummary:()=>request<Record<string,unknown>>('/finance/cash-summary'),
  productionBatches:()=>request<ApiList<Record<string,unknown>>>('/production/batches'),
  livestock:()=>request<ApiList<Record<string,unknown>>>('/production/livestock'),
  reportSummary:(start?:string,end?:string)=>request<Record<string,unknown>>(`/reports/summary?start=${encodeURIComponent(start??'1970-01-01')}&end=${encodeURIComponent(end??'2999-12-31')}`),
