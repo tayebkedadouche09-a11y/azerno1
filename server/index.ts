@@ -3,35 +3,25 @@ import express from 'express';
 import authRouter from './routes/auth.js';
 import businessRouter from './routes/business.js';
 import operationsRouter from './routes/operations.js';
+import financeRouter from './routes/finance.js';
+import productionRouter from './routes/production.js';
+import reportsRouter from './routes/reports.js';
+import syncRouter from './routes/sync.js';
 import healthRouter from './routes/health.js';
 
 const app = express();
 const port = Number(process.env.API_PORT ?? 4000);
-
 app.disable('x-powered-by');
-app.use((req, res, next) => {
-  const allowed = process.env.CORS_ORIGIN?.split(',').map((value) => value.trim()).filter(Boolean);
-  const origin = req.headers.origin;
-  if (!allowed || allowed.length === 0) res.setHeader('Access-Control-Allow-Origin', '*');
-  else if (origin && allowed.includes(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-  if (req.method === 'OPTIONS') return res.sendStatus(204);
-  next();
-});
-app.use(express.json({ limit: '1mb' }));
-
-app.get('/api', (_req, res) => res.json({ name: 'AZRNOU API', version: '1.0.0' }));
-app.use('/api/health', healthRouter);
-app.use('/api/auth', authRouter);
-app.use('/api/business', businessRouter);
-app.use('/api/operations', operationsRouter);
-
-app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  console.error('[AZRNOU API]', error);
-  const message = error instanceof Error ? error.message : 'Internal server error';
-  const status = /not found|insufficient|invalid|exceeds|already initialized|quantity|stock/i.test(message) ? 400 : 500;
-  res.status(status).json({ error: status === 500 ? 'Internal server error' : message });
-});
-
-app.listen(port, '0.0.0.0', () => console.log(`[AZRNOU] API listening on :${port}`));
+app.use((req,res,next)=>{const allowed=process.env.CORS_ORIGIN?.split(',').map(v=>v.trim()).filter(Boolean);const origin=req.headers.origin;if(!allowed||allowed.length===0)res.setHeader('Access-Control-Allow-Origin','*');else if(origin&&allowed.includes(origin))res.setHeader('Access-Control-Allow-Origin',origin);res.setHeader('Access-Control-Allow-Headers','Content-Type, Authorization');res.setHeader('Access-Control-Allow-Methods','GET,POST,PUT,PATCH,DELETE,OPTIONS');if(req.method==='OPTIONS')return res.sendStatus(204);next();});
+app.use(express.json({limit:'1mb'}));
+app.get('/api',(_req,res)=>res.json({name:'AZRNOU API',version:'1.1.0'}));
+app.use('/api/health',healthRouter);
+app.use('/api/auth',authRouter);
+app.use('/api/business',businessRouter);
+app.use('/api/operations',operationsRouter);
+app.use('/api/finance',financeRouter);
+app.use('/api/production',productionRouter);
+app.use('/api/reports',reportsRouter);
+app.use('/api/sync',syncRouter);
+app.use((error:unknown,_req:express.Request,res:express.Response,_next:express.NextFunction)=>{console.error('[AZRNOU API]',error);const message=error instanceof Error?error.message:'Internal server error';const status=/not found|insufficient|invalid|exceeds|already initialized|quantity|stock|required/i.test(message)?400:500;res.status(status).json({error:status===500?'Internal server error':message});});
+app.listen(port,'0.0.0.0',()=>console.log(`[AZRNOU] API listening on :${port}`));
