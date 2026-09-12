@@ -15,37 +15,53 @@ export async function loadCoreData() {
 }
 
 export async function refreshCoreData() {
-  if (!navigator.onLine) return loadCoreData();
   return loadCoreData();
 }
 
 export async function flushCoreCreateQueue() {
-  if (!navigator.onLine) return { applied: 0, remaining: offlineQueue.list().length };
-
+  if (!navigator.onLine) return { applied: 0, rejected: 0, remaining: offlineQueue.list().length };
   const pending = offlineQueue.list().filter(operation => operation.status !== 'failed');
-  let applied = 0;
+  if (!pending.length) return { applied: 0, rejected: 0, remaining: 0 };
 
-  for (const operation of pending) {
-    if (operation.action !== 'create') continue;
-    try {
-      if (operation.entity === 'customer') await api.createCustomer(operation.payload);
-      else if (operation.entity === 'product') await api.createProduct(operation.payload);
-      else if (operation.entity === 'order') await api.createOrder(operation.payload);
-      else continue;
-      offlineQueue.remove(operation.id);
-      applied += 1;
-    } catch (error) {
+  const deviceId = getDeviceId();
+  const operations = pending.map(operation => ({
+    operationId: operation.id,
+    entityType: operation.entity,
+    operationType: operation.action,
+    payload: operation.payload,
+  }));
+
+  try {
+    const result = await api.syncPush(deviceId, operations);
+    const accepted = new Set(result.accepted ?? []);
+    const duplicates = new Set(result.duplicates ?? []);
+    const rejected = new Map((result.rejected ?? []).map(item => [item.operationId, item.reason]));
+
+    for (const operation of pending) {
+      if (accepted.has(operation.id) || duplicates.has(operation.id)) {
+        offlineQueue.remove(operation.id);
+      } else if (rejected.has(operation.id)) {
+        offlineQueue.update(operation.id, {
+          status: 'failed',
+          attempts: operation.attempts + 1,
+          lastError: rejected.get(operation.id),
+        });
+      }
+    }
+
+    const applied = accepted.size + duplicates.size;
+    if (applied) await refreshCoreData();
+    return { applied, rejected: rejected.size, remaining: offlineQueue.list().length };
+  } catch (error) {
+    for (const operation of pending) {
       offlineQueue.update(operation.id, {
-        status: 'failed',
+        status: 'pending',
         attempts: operation.attempts + 1,
         lastError: error instanceof Error ? error.message : String(error),
       });
-      break;
     }
+    return { applied: 0, rejected: 0, remaining: offlineQueue.list().length };
   }
-
-  if (applied) await loadCoreData();
-  return { applied, remaining: offlineQueue.list().length };
 }
 
 export function startCoreDataSync(onRefresh?: () => void) {
@@ -54,10 +70,8 @@ export function startCoreDataSync(onRefresh?: () => void) {
     await refreshCoreData();
     onRefresh?.();
   };
-
   window.addEventListener('online', handleOnline);
   if (navigator.onLine) void handleOnline();
-
   return () => window.removeEventListener('online', handleOnline);
 }
 
