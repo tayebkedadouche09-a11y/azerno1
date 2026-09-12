@@ -84,6 +84,41 @@ router.post('/purchases', requireRole('owner','manager'), async(req,res,next)=>{
   }catch(e){next(e);}
 });
 
+router.get('/supplier-payments', async (req,res,next)=>{
+  try {
+    const params: unknown[] = [];
+    const where: string[] = [];
+    if (req.query.purchaseId) { params.push(String(req.query.purchaseId)); where.push(`sp.purchase_id=$${params.length}`); }
+    if (req.query.supplierId) { params.push(String(req.query.supplierId)); where.push(`sp.supplier_id=$${params.length}`); }
+    const r=await query(`SELECT sp.*,p.number AS purchase_number,s.name AS supplier_name FROM supplier_payments sp JOIN purchases p ON p.id=sp.purchase_id LEFT JOIN suppliers s ON s.id=sp.supplier_id ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY sp.payment_date DESC,sp.created_at DESC`,params);
+    res.json({items:r.rows});
+  } catch(e){next(e);}
+});
+
+router.post('/supplier-payments', requireRole('owner','manager'), async(req,res,next)=>{
+  try {
+    const purchaseId=String(req.body?.purchaseId??'');
+    const amount=Number(req.body?.amount);
+    if(!purchaseId || !Number.isFinite(amount) || amount<=0) return res.status(400).json({error:'Purchase and positive amount are required'});
+    const result=await transaction(async client=>{
+      const purchase=await client.query<{id:string;supplier_id:string|null;total:number|string;paid_total:number|string;status:string}>(`SELECT id,supplier_id,total,paid_total,status FROM purchases WHERE id=$1 FOR UPDATE`,[purchaseId]);
+      const row=purchase.rows[0];
+      if(!row) throw new Error('Purchase not found');
+      if(row.status==='cancelled') throw new Error('Cannot pay a cancelled purchase');
+      const total=Number(row.total); const paid=Number(row.paid_total); const remaining=Math.max(total-paid,0);
+      if(amount>remaining+0.000001) throw new Error(`Payment exceeds remaining supplier balance (${remaining.toFixed(2)})`);
+      const key=req.body?.idempotencyKey?String(req.body.idempotencyKey):null;
+      if(key){const existing=await client.query(`SELECT * FROM supplier_payments WHERE idempotency_key=$1 LIMIT 1`,[key]);if(existing.rows[0])return existing.rows[0];}
+      const payment=await client.query(`INSERT INTO supplier_payments(purchase_id,supplier_id,amount,payment_date,method,reference,note,created_by,idempotency_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,[purchaseId,row.supplier_id,amount,req.body?.paymentDate??new Date().toISOString().slice(0,10),String(req.body?.method??'cash'),req.body?.reference??null,req.body?.note??null,req.user!.id,key]);
+      const newPaid=paid+amount;
+      await client.query(`UPDATE purchases SET paid_total=$2 WHERE id=$1`,[purchaseId,newPaid]);
+      await client.query(`INSERT INTO audit_logs(user_id,action,entity_type,entity_id,after_data) VALUES($1,'create','supplier_payment',$2,$3)`,[req.user!.id,payment.rows[0].id,JSON.stringify(payment.rows[0])]);
+      return payment.rows[0];
+    });
+    res.status(201).json(result);
+  } catch(e){next(e);}
+});
+
 router.get('/cash-summary', async (_req,res,next)=>{
   try{const r=await query(`SELECT COALESCE((SELECT SUM(amount) FROM payments),0) AS incoming,COALESCE((SELECT SUM(amount) FROM expenses),0) AS expenses,COALESCE((SELECT SUM(paid_total) FROM purchases),0) AS purchases_paid`); res.json(r.rows[0]);}catch(e){next(e);}
 });
