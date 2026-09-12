@@ -37,6 +37,7 @@ export const api={
  createDelivery:(payload:unknown)=>request('/operations/deliveries',{method:'POST',body:JSON.stringify(payload)}),
  createInvoiceFromOrder:(orderId:string)=>request(`/operations/invoices/from-order/${encodeURIComponent(orderId)}`,{method:'POST'}),
  createProductionBatch:(payload:unknown)=>request('/production/batches',{method:'POST',body:JSON.stringify(payload)}),
+ completeProductionBatch:(batchId:string,outputVariantId:string)=>request(`/production/batches/${encodeURIComponent(batchId)}/complete`,{method:'PATCH',body:JSON.stringify({outputVariantId})}),
  createLivestockEvent:(payload:unknown)=>request('/production/livestock/events',{method:'POST',body:JSON.stringify(payload)}),
  createFeed:(payload:unknown)=>request('/production/feed',{method:'POST',body:JSON.stringify(payload)}),
  syncPush:(deviceId:string,operations:unknown[])=>request<SyncPushResult>('/sync/push',{method:'POST',body:JSON.stringify({deviceId,operations})}),
