@@ -1,5 +1,6 @@
 export type ApiUser = { id: string; name: string; role: 'owner' | 'manager' | 'worker' };
 export type ApiList<T> = { items: T[] };
+export type SyncPushResult = { accepted: string[]; duplicates: string[]; rejected: Array<{ operationId: string; reason: string }> };
 const API_BASE = (import.meta.env.VITE_API_URL ?? '/api').replace(/\/$/, '');
 const TOKEN_KEY = 'azrnou_access_token';
 const token = () => localStorage.getItem(TOKEN_KEY);
@@ -37,7 +38,7 @@ export const api={
  createProductionBatch:(payload:unknown)=>request('/production/batches',{method:'POST',body:JSON.stringify(payload)}),
  createLivestockEvent:(payload:unknown)=>request('/production/livestock/events',{method:'POST',body:JSON.stringify(payload)}),
  createFeed:(payload:unknown)=>request('/production/feed',{method:'POST',body:JSON.stringify(payload)}),
- syncPush:(deviceId:string,operations:unknown[])=>request('/sync/push',{method:'POST',body:JSON.stringify({deviceId,operations})}),
- syncPull:(deviceId:string,since:string)=>request(`/sync/pull?deviceId=${encodeURIComponent(deviceId)}&since=${encodeURIComponent(since)}`),
- syncStatus:(deviceId:string)=>request(`/sync/status?deviceId=${encodeURIComponent(deviceId)}`),
+ syncPush:(deviceId:string,operations:unknown[])=>request<SyncPushResult>('/sync/push',{method:'POST',body:JSON.stringify({deviceId,operations})}),
+ syncPull:(deviceId:string,since:string)=>request<{items:Record<string,unknown>[];nextSince:string}>(`/sync/pull?deviceId=${encodeURIComponent(deviceId)}&since=${encodeURIComponent(since)}`),
+ syncStatus:(deviceId:string)=>request<Record<string,unknown>>(`/sync/status?deviceId=${encodeURIComponent(deviceId)}`),
 };
