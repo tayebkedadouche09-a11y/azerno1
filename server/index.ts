@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import authRouter from './routes/auth.js';
+import paymentsRouter from './routes/payments.js';
 import businessRouter from './routes/business.js';
 import coreRouter from './routes/core.js';
 import operationsRouter from './routes/operations.js';
@@ -19,6 +20,9 @@ app.use(express.json({limit:'1mb'}));
 app.get('/api',(_req,res)=>res.json({name:'AZRNOU API',version:'1.3.0'}));
 app.use('/api/health',healthRouter);
 app.use('/api/auth',authRouter);
+// Mount the idempotent payment handler before the legacy business router.
+// The legacy /business/payments route remains as a compatibility fallback.
+app.use('/api/business',paymentsRouter);
 app.use('/api/business',businessRouter);
 app.use('/api/business-core',coreRouter);
 app.use('/api/operations',operationsRouter);
