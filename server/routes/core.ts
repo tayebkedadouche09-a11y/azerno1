@@ -39,34 +39,33 @@ router.post('/stock-adjustments', requireRole('owner', 'manager'), async (req, r
   } catch (error) { next(error); }
 });
 
-router.patch('/orders/:id/status', requireRole('owner', 'manager', 'worker'), async (req, res, next) => {
+router.patch('/orders/:id/status', async (req, res, next) => {
   try {
     const requestedStatus = String(req.body?.status ?? '');
     const allowed = new Set(['confirmed', 'preparing', 'ready', 'cancelled']);
     if (!allowed.has(requestedStatus)) throw new Error('Invalid order status transition');
+    const requiredRole = requestedStatus === 'cancelled' ? 'manager' : 'worker';
+    if (!['owner', 'manager'].includes(req.user!.role) && requiredRole !== 'worker') throw new Error('Only owners or managers can cancel orders');
+    if (!['owner', 'manager', 'worker'].includes(req.user!.role)) throw new Error('Unauthorized');
 
     const result = await transaction(async client => {
       const current = await client.query(`SELECT * FROM orders WHERE id=$1 FOR UPDATE`, [req.params.id]);
       if (!current.rows[0]) throw new Error('Order not found');
       const from = String(current.rows[0].status);
-
       if (requestedStatus === 'cancelled') {
         if (!['confirmed', 'preparing', 'ready'].includes(from)) throw new Error(`Order cannot be cancelled from ${from}`);
-
         const items = await client.query(`SELECT id,variant_id,quantity,delivered_quantity FROM order_items WHERE order_id=$1 ORDER BY id FOR UPDATE`, [req.params.id]);
         for (const item of items.rows) {
-          const remaining = Number(item.quantity) - Number(item.delivered_quantity);
-          if (remaining <= 0) continue;
+          const remaining = Number(item.quantity) - Number(item.delivered_quantity); if (remaining <= 0) continue;
           const balance = await client.query(`SELECT quantity,reserved_quantity FROM inventory_balances WHERE variant_id=$1 FOR UPDATE`, [item.variant_id]);
           if (!balance.rows[0] || Number(balance.rows[0].reserved_quantity) < remaining) throw new Error(`Reservation mismatch for variant ${item.variant_id}`);
           await client.query(`UPDATE inventory_balances SET reserved_quantity=reserved_quantity-$2,updated_at=NOW() WHERE variant_id=$1`, [item.variant_id, remaining]);
-          await client.query(`INSERT INTO inventory_movements(variant_id,movement_type,quantity,reference_type,reference_id,idempotency_key,created_by) VALUES($1,'order_reservation',$2,'order',$3,$4,$5)`, [item.variant_id, -remaining, req.params.id, `order:${req.params.id}:cancel:${item.id}`, req.user!.id]);
+          await client.query(`INSERT INTO inventory_movements(variant_id,movement_type,quantity,reference_type,reference_id,idempotency_key,created_by) VALUES($1,'order_reservation',$2,'order',$3,$4,$5) ON CONFLICT(idempotency_key) DO NOTHING`, [item.variant_id, -remaining, req.params.id, `order:${req.params.id}:cancel:${item.id}`, req.user!.id]);
         }
       } else {
         const valid = (from === 'confirmed' && requestedStatus === 'preparing') || (from === 'preparing' && requestedStatus === 'ready') || from === requestedStatus;
         if (!valid) throw new Error(`Invalid order status transition from ${from} to ${requestedStatus}`);
       }
-
       const updated = await client.query(`UPDATE orders SET status=$2,updated_at=NOW() WHERE id=$1 RETURNING *`, [req.params.id, requestedStatus]);
       await client.query(`INSERT INTO audit_logs(user_id,action,entity_type,entity_id,before_data,after_data) VALUES($1,'status_change','order',$2,$3,$4)`, [req.user!.id, req.params.id, JSON.stringify(current.rows[0]), JSON.stringify(updated.rows[0])]);
       return updated.rows[0];
