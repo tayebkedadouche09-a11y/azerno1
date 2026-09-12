@@ -1,0 +1,6 @@
+{
+  "name": "AZRNOU",
+  "description": "Système de gestion complet pour fromagerie artisanale, production laitière et élevage.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

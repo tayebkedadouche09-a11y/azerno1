@@ -1,0 +1,416 @@
+import React, { useState, useMemo } from 'react';
+import {
+  Package, Plus, Search, AlertTriangle, Edit3,
+  Barcode, ArrowUpDown, Check, X, ShieldAlert, Sparkles
+} from 'lucide-react';
+import { db } from '../../lib/storage';
+import { ProductVariant } from '../../types';
+import { formatDZD, formatUnit, triggerHaptic } from '../../lib/utils';
+import { EmptyState } from '../common/EmptyState';
+
+interface ProductsViewProps {
+  selectedVariantId?: string;
+  onClearSelectedVariant?: () => void;
+}
+
+export const ProductsView: React.FC<ProductsViewProps> = ({
+  selectedVariantId,
+  onClearSelectedVariant
+}) => {
+  const [variants, setVariants] = useState<ProductVariant[]>(() => db.getVariants());
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState('all');
+  const [editingVariant, setEditingVariant] = useState<ProductVariant | null>(null);
+  const [isAdjustingStock, setIsAdjustingStock] = useState<ProductVariant | null>(null);
+  const [newStockValue, setNewStockValue] = useState<number>(0);
+  const [adjustmentReason, setAdjustmentReason] = useState<string>('Inventaire physique périodique');
+
+  const categories = db.getCategories();
+
+  const refresh = () => {
+    setVariants([...db.getVariants()]);
+  };
+
+  const filteredVariants = useMemo(() => {
+    return variants.filter(v => {
+      if (selectedCategory !== 'all' && v.categoryId !== selectedCategory) return false;
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase().trim();
+        return v.name.toLowerCase().includes(q) || v.sku.toLowerCase().includes(q) || (v.barcode && v.barcode.includes(q));
+      }
+      return true;
+    });
+  }, [variants, selectedCategory, searchQuery]);
+
+  const handleOpenStockAdjust = (v: ProductVariant) => {
+    setIsAdjustingStock(v);
+    setNewStockValue(v.currentStock);
+    setAdjustmentReason('Inventaire physique de contrôle');
+  };
+
+  const handleSaveStockAdjust = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isAdjustingStock) return;
+    try {
+      db.adjustStock(isAdjustingStock.id, newStockValue, adjustmentReason);
+      refresh();
+      setIsAdjustingStock(null);
+      triggerHaptic();
+      alert(`Stock mis à jour pour ${isAdjustingStock.name}`);
+    } catch (e: any) {
+      alert(e.message);
+    }
+  };
+
+  const handleSaveVariant = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingVariant) return;
+    try {
+      db.updateVariant(editingVariant.id, {
+        name: editingVariant.name,
+        cost: editingVariant.cost,
+        wholesalePrice: editingVariant.wholesalePrice,
+        retailPrice: editingVariant.retailPrice,
+        minStock: editingVariant.minStock,
+        barcode: editingVariant.barcode
+      });
+      refresh();
+      setEditingVariant(null);
+      triggerHaptic();
+      alert('Produit mis à jour avec succès !');
+    } catch (e: any) {
+      alert(e.message);
+    }
+  };
+
+  return (
+    <div className="space-y-5 pb-12 animate-fade-in">
+      
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900 dark:text-white flex items-center gap-2">
+            <Package className="w-6 h-6 text-emerald-700 dark:text-emerald-400" />
+            <span>Catalogue & Gestion des Stocks</span>
+          </h1>
+          <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-0.5">
+            Formule mathématique : Stock Disponible = Stock Physique - Stock Réservé
+          </p>
+        </div>
+      </div>
+
+      {/* Search & Categories Bar */}
+      <div className="flex flex-col sm:flex-row gap-3">
+        <div className="relative flex-1">
+          <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Rechercher par référence SKU, nom de fromage ou code-barres..."
+            className="w-full pl-10 pr-4 py-2.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl text-xs sm:text-sm text-slate-900 dark:text-white"
+          />
+        </div>
+
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
+          <button
+            type="button"
+            onClick={() => setSelectedCategory('all')}
+            className={`px-3 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition ${
+              selectedCategory === 'all'
+                ? 'bg-emerald-800 text-white shadow-sm'
+                : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
+            }`}
+          >
+            Tous les rayons
+          </button>
+          {categories.map(c => (
+            <button
+              key={c.id}
+              type="button"
+              onClick={() => setSelectedCategory(c.id)}
+              className={`px-3 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition ${
+                selectedCategory === c.id
+                  ? 'bg-emerald-800 text-white shadow-sm'
+                  : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
+              }`}
+            >
+              {c.name}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Variants List Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {filteredVariants.map((v) => {
+          const breakdown = db.getStockBreakdown(v.id);
+          const isLow = breakdown.current <= v.minStock;
+
+          return (
+            <div
+              key={v.id}
+              className={`p-5 rounded-3xl bg-white dark:bg-slate-800 border transition-all flex flex-col justify-between ${
+                isLow
+                  ? 'border-amber-300 dark:border-amber-700/80 shadow-sm'
+                  : 'border-slate-200 dark:border-slate-700 hover:border-slate-300'
+              }`}
+            >
+              <div>
+                <div className="flex items-start justify-between gap-2 mb-2">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                    {v.sku}
+                  </span>
+                  <div className="flex items-center gap-1">
+                    {isLow && (
+                      <span className="flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+                        <AlertTriangle className="w-3 h-3" />
+                        Stock bas
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setEditingVariant(v)}
+                      className="p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 rounded-lg hover:bg-slate-100"
+                      title="Modifier les prix et paramètres"
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  {v.name}
+                </h3>
+                {v.barcode && (
+                  <div className="flex items-center gap-1 text-[11px] text-slate-400 mt-0.5">
+                    <Barcode className="w-3.5 h-3.5" />
+                    <span>{v.barcode}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Stock Formula Breakdown Pill */}
+              <div className="mt-4 p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-700/40 border border-slate-200/80 dark:border-slate-700 space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-slate-500 font-medium">Stock Physique :</span>
+                  <strong className="text-slate-900 dark:text-white">{breakdown.current} {v.unit}</strong>
+                </div>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-slate-500 font-medium">Réservé (BC en cours) :</span>
+                  <span className="font-semibold text-amber-600 dark:text-amber-400">- {breakdown.reserved} {v.unit}</span>
+                </div>
+                <div className="flex items-center justify-between text-xs pt-1.5 border-t border-slate-200 dark:border-slate-600">
+                  <span className="font-bold text-emerald-800 dark:text-emerald-300">Stock Disponible :</span>
+                  <span className="text-sm font-black text-emerald-700 dark:text-emerald-400">
+                    {breakdown.available} {v.unit}
+                  </span>
+                </div>
+              </div>
+
+              {/* Pricing breakdown */}
+              <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-700 flex items-center justify-between text-xs">
+                <div>
+                  <span className="text-[10px] text-slate-400 block">Prix Gros :</span>
+                  <span className="font-bold text-slate-800 dark:text-slate-200">{formatDZD(v.wholesalePrice)}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400 block">Prix Détail :</span>
+                  <span className="font-bold text-emerald-700 dark:text-emerald-400">{formatDZD(v.retailPrice)}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400 block">Coût :</span>
+                  <span className="font-semibold text-slate-500">{formatDZD(v.cost)}</span>
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div className="mt-4 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleOpenStockAdjust(v)}
+                  className="w-full py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 text-slate-800 dark:text-slate-200 text-xs font-semibold rounded-xl transition flex items-center justify-center gap-1.5"
+                >
+                  <ArrowUpDown className="w-3.5 h-3.5" />
+                  <span>Ajuster Stock</span>
+                </button>
+              </div>
+
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Adjust Stock Modal */}
+      {isAdjustingStock && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white dark:bg-slate-900 rounded-3xl p-6 max-w-md w-full shadow-2xl border border-slate-200 dark:border-slate-800">
+            <h3 className="text-base font-bold text-slate-900 dark:text-white mb-1">
+              Ajustement de Stock Physique
+            </h3>
+            <p className="text-xs text-slate-500 mb-4">
+              {isAdjustingStock.name} ({isAdjustingStock.sku})
+            </p>
+
+            <form onSubmit={handleSaveStockAdjust} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
+                  Nouveau stock physique compté ({isAdjustingStock.unit}) :
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  value={newStockValue}
+                  onChange={(e) => setNewStockValue(parseInt(e.target.value) || 0)}
+                  className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border rounded-xl text-base font-bold text-slate-900 dark:text-white"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
+                  Motif de l'ajustement :
+                </label>
+                <input
+                  type="text"
+                  value={adjustmentReason}
+                  onChange={(e) => setAdjustmentReason(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border rounded-xl text-xs"
+                  required
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsAdjustingStock(null)}
+                  className="px-4 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-100 rounded-xl"
+                >
+                  Annuler
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 bg-emerald-800 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl"
+                >
+                  Enregistrer l'ajustement
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Variant Prices Modal */}
+      {editingVariant && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white dark:bg-slate-900 rounded-3xl p-6 max-w-lg w-full shadow-2xl border border-slate-200 dark:border-slate-800">
+            <h3 className="text-base font-bold text-slate-900 dark:text-white mb-1">
+              Paramètres Tarifaires & Déclinaison
+            </h3>
+            <p className="text-xs text-slate-500 mb-4">
+              {editingVariant.name} ({editingVariant.sku})
+            </p>
+
+            <form onSubmit={handleSaveVariant} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
+                  Nom affiché :
+                </label>
+                <input
+                  type="text"
+                  value={editingVariant.name}
+                  onChange={(e) => setEditingVariant({ ...editingVariant, name: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border rounded-xl text-xs font-semibold"
+                  required
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
+                    Prix Gros (DA) :
+                  </label>
+                  <input
+                    type="number"
+                    value={editingVariant.wholesalePrice}
+                    onChange={(e) => setEditingVariant({ ...editingVariant, wholesalePrice: parseFloat(e.target.value) || 0 })}
+                    className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border rounded-xl text-xs font-bold"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
+                    Prix Détail (DA) :
+                  </label>
+                  <input
+                    type="number"
+                    value={editingVariant.retailPrice}
+                    onChange={(e) => setEditingVariant({ ...editingVariant, retailPrice: parseFloat(e.target.value) || 0 })}
+                    className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border rounded-xl text-xs font-bold"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
+                    Coût de revient estimé (DA) :
+                  </label>
+                  <input
+                    type="number"
+                    value={editingVariant.cost}
+                    onChange={(e) => setEditingVariant({ ...editingVariant, cost: parseFloat(e.target.value) || 0 })}
+                    className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border rounded-xl text-xs font-bold"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
+                    Seuil Stock Min d'Alerte :
+                  </label>
+                  <input
+                    type="number"
+                    value={editingVariant.minStock}
+                    onChange={(e) => setEditingVariant({ ...editingVariant, minStock: parseInt(e.target.value) || 0 })}
+                    className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border rounded-xl text-xs font-bold"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">
+                  Code-barres EAN / Manuel :
+                </label>
+                <input
+                  type="text"
+                  value={editingVariant.barcode || ''}
+                  onChange={(e) => setEditingVariant({ ...editingVariant, barcode: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border rounded-xl text-xs"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingVariant(null)}
+                  className="px-4 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-100 rounded-xl"
+                >
+                  Annuler
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 bg-emerald-800 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl"
+                >
+                  Enregistrer modifications
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+};
