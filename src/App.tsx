@@ -1,7 +1,3 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
 import React, { useState, useEffect } from 'react';
 import { db } from './lib/storage';
 import { api, getAccessToken } from './lib/api';
@@ -15,6 +11,7 @@ import { GlobalSearchModal } from './components/layout/GlobalSearchModal';
 import { NotificationDrawer } from './components/layout/NotificationDrawer';
 import { MoreMenuModal } from './components/layout/MoreMenuModal';
 import { BarcodeScannerModal } from './components/common/BarcodeScannerModal';
+import { SyncStatusPill } from './components/common/SyncStatusPill';
 import { DashboardView } from './components/dashboard/DashboardView';
 import { OrdersView } from './components/orders/OrdersView';
 import { QuickSaleView } from './components/pos/QuickSaleView';
@@ -46,77 +43,23 @@ export default function App() {
   const [selectedVariantId, setSelectedVariantId] = useState<string | undefined>(undefined);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | undefined>(undefined);
 
-  useEffect(() => {
-    let active = true;
-    const bootstrapSession = async () => {
-      if (!getAccessToken()) { if (active) setServerSessionReady(true); return; }
-      try {
-        const result = await api.me();
-        if (!active) return;
-        const serverUser: User = { id: result.user.id, name: result.user.name, role: result.user.role, pin: '', active: true };
-        setCurrentUser(serverUser);
-      } catch {
-        api.logout().catch(() => undefined);
-      } finally {
-        if (active) setServerSessionReady(true);
-      }
-    };
-    void bootstrapSession();
-    return () => { active = false; };
-  }, []);
+  useEffect(() => { let active=true; const bootstrapSession=async()=>{ if(!getAccessToken()){if(active)setServerSessionReady(true);return;} try{const result=await api.me();if(!active)return;setCurrentUser({id:result.user.id,name:result.user.name,role:result.user.role,pin:'',active:true});}catch{await api.logout().catch(()=>undefined);}finally{if(active)setServerSessionReady(true);}};void bootstrapSession();return()=>{active=false;}; }, []);
+  useEffect(() => startCoreDataSync(() => setAppState({ ...db.getState() })), []);
+  useEffect(() => { const unsubscribe=db.subscribe(()=>{setAppState({...db.getState()});setCurrentUser(db.getCurrentUser());});return()=>unsubscribe(); }, []);
+  useEffect(() => { const handleKeyDown=(e:KeyboardEvent)=>{if((e.ctrlKey||e.metaKey)&&e.key==='k'){e.preventDefault();setIsSearchOpen(p=>!p);}};window.addEventListener('keydown',handleKeyDown);return()=>window.removeEventListener('keydown',handleKeyDown); }, []);
 
-  useEffect(() => {
-    const stopSync = startCoreDataSync(() => setAppState({ ...db.getState() }));
-    return stopSync;
-  }, []);
-
-  useEffect(() => {
-    const unsubscribe = db.subscribe(() => { setAppState({ ...db.getState() }); setCurrentUser(db.getCurrentUser()); });
-    return () => unsubscribe();
-  }, []);
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => { if ((e.ctrlKey || e.metaKey) && e.key === 'k') { e.preventDefault(); setIsSearchOpen(prev => !prev); } };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
-
-  const handleUserChange = (user: User) => { db.switchUser(user.id); setCurrentUser(user); };
-  const handleNavigate = (tab: MainTab, id?: string) => { setCurrentTab(tab); if (tab === 'orders') setSelectedOrderId(id); if (tab === 'products') setSelectedVariantId(id); if (tab === 'customers') setSelectedCustomerId(id); };
-  const handleQuickAction = (key: 'new_order' | 'quick_sale' | 'new_batch' | 'new_expense' | 'record_payment' | 'scan_code') => { if (key === 'new_order') setIsCreateOrderModalOpen(true); else if (key === 'quick_sale') setCurrentTab('pos'); else if (key === 'new_batch') setCurrentTab('production'); else if (key === 'new_expense') setCurrentTab('money'); else if (key === 'record_payment') setCurrentTab('customers'); else setIsScannerOpen(true); };
-  const handleBarcodeScanResult = (code: string) => { const matched = db.getVariantByBarcodeOrSku(code); if (matched) { setCurrentTab('products'); setSelectedVariantId(matched.id); alert(`Produit identifié : ${matched.name} (Stock: ${matched.currentStock} ${matched.unit})`); } else alert(`Code scanné : "${code}" — Aucun article correspondant trouvé.`); };
-  const pendingOrdersCount = appState.orders.filter(o => ['confirmed', 'preparing', 'ready'].includes(o.status)).length;
-
-  if (!serverSessionReady) return <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 text-sm text-slate-500">Connexion sécurisée AZRNOU...</div>;
-
-  return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors">
-      <Header currentLang={currentLang} onLanguageChange={setCurrentLang} currentUser={currentUser} onUserChange={handleUserChange} onOpenSearch={() => setIsSearchOpen(true)} onOpenNotifications={() => setIsNotificationsOpen(true)} onOpenBarcodeScanner={() => setIsScannerOpen(true)} />
-      <div className="flex-1 flex flex-row">
-        <Sidebar currentTab={currentTab} onSelectTab={tab => handleNavigate(tab)} onOpenQuickActions={() => setIsQuickActionsOpen(true)} currentLang={currentLang} pendingOrdersCount={pendingOrdersCount} />
-        <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 pb-24 lg:pb-12 overflow-x-hidden">
-          {currentTab === 'home' && <DashboardView onNavigate={handleNavigate} onOpenQuickAction={handleQuickAction} currentLang={currentLang} />}
-          {currentTab === 'orders' && <OrdersView selectedOrderId={selectedOrderId} onClearSelectedOrder={() => setSelectedOrderId(undefined)} />}
-          {currentTab === 'pos' && <QuickSaleView />}
-          {currentTab === 'products' && <ProductsView selectedVariantId={selectedVariantId} onClearSelectedVariant={() => setSelectedVariantId(undefined)} />}
-          {currentTab === 'customers' && <CustomersView selectedCustomerId={selectedCustomerId} onClearSelectedCustomer={() => setSelectedCustomerId(undefined)} />}
-          {currentTab === 'production' && <ProductionView />}
-          {currentTab === 'livestock' && <LivestockView />}
-          {currentTab === 'money' && <MoneyView />}
-          {currentTab === 'documents' && <DocumentsView />}
-          {currentTab === 'reports' && <ReportsView />}
-          {currentTab === 'suppliers' && <SuppliersView />}
-          {currentTab === 'audit' && <AuditView />}
-          {currentTab === 'settings' && <SettingsView currentLang={currentLang} onLanguageChange={setCurrentLang} />}
-        </main>
-      </div>
-      <BottomNav currentTab={currentTab} onSelectTab={tab => handleNavigate(tab)} onOpenQuickActions={() => setIsQuickActionsOpen(true)} onOpenMoreMenu={() => setIsMoreMenuOpen(true)} currentLang={currentLang} pendingOrdersCount={pendingOrdersCount} />
-      <QuickActionModal isOpen={isQuickActionsOpen} onClose={() => setIsQuickActionsOpen(false)} onAction={handleQuickAction} currentLang={currentLang} />
-      <GlobalSearchModal isOpen={isSearchOpen} onClose={() => setIsSearchOpen(false)} onNavigate={handleNavigate} />
-      <NotificationDrawer isOpen={isNotificationsOpen} onClose={() => setIsNotificationsOpen(false)} onNavigate={handleNavigate} />
-      <MoreMenuModal isOpen={isMoreMenuOpen} onClose={() => setIsMoreMenuOpen(false)} onSelectTab={tab => handleNavigate(tab)} currentTab={currentTab} />
-      <BarcodeScannerModal isOpen={isScannerOpen} onClose={() => setIsScannerOpen(false)} onScan={handleBarcodeScanResult} />
-      {isCreateOrderModalOpen && <CreateOrderModal isOpen={isCreateOrderModalOpen} onClose={() => setIsCreateOrderModalOpen(false)} onOrderCreated={orderId => { setCurrentTab('orders'); setSelectedOrderId(orderId); }} />}
-    </div>
-  );
+  const handleUserChange=(user:User)=>{db.switchUser(user.id);setCurrentUser(user);};
+  const handleNavigate=(tab:MainTab,id?:string)=>{setCurrentTab(tab);if(tab==='orders')setSelectedOrderId(id);if(tab==='products')setSelectedVariantId(id);if(tab==='customers')setSelectedCustomerId(id);};
+  const handleQuickAction=(key:'new_order'|'quick_sale'|'new_batch'|'new_expense'|'record_payment'|'scan_code')=>{if(key==='new_order')setIsCreateOrderModalOpen(true);else if(key==='quick_sale')setCurrentTab('pos');else if(key==='new_batch')setCurrentTab('production');else if(key==='new_expense')setCurrentTab('money');else if(key==='record_payment')setCurrentTab('customers');else setIsScannerOpen(true);};
+  const handleBarcodeScanResult=(code:string)=>{const matched=db.getVariantByBarcodeOrSku(code);if(matched){setCurrentTab('products');setSelectedVariantId(matched.id);alert(`Produit identifié : ${matched.name} (Stock: ${matched.currentStock} ${matched.unit})`);}else alert(`Code scanné : "${code}" — Aucun article correspondant trouvé.`);};
+  const pendingOrdersCount=appState.orders.filter(o=>['confirmed','preparing','ready'].includes(o.status)).length;
+  if(!serverSessionReady)return <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 text-sm text-slate-500">Connexion sécurisée AZRNOU...</div>;
+  return <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors">
+    <Header currentLang={currentLang} onLanguageChange={setCurrentLang} currentUser={currentUser} onUserChange={handleUserChange} onOpenSearch={()=>setIsSearchOpen(true)} onOpenNotifications={()=>setIsNotificationsOpen(true)} onOpenBarcodeScanner={()=>setIsScannerOpen(true)} />
+    <div className="flex-1 flex flex-row"><Sidebar currentTab={currentTab} onSelectTab={tab=>handleNavigate(tab)} onOpenQuickActions={()=>setIsQuickActionsOpen(true)} currentLang={currentLang} pendingOrdersCount={pendingOrdersCount}/><main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 pb-24 lg:pb-12 overflow-x-hidden">
+      {currentTab==='home'&&<DashboardView onNavigate={handleNavigate} onOpenQuickAction={handleQuickAction} currentLang={currentLang}/>} {currentTab==='orders'&&<OrdersView selectedOrderId={selectedOrderId} onClearSelectedOrder={()=>setSelectedOrderId(undefined)}/>} {currentTab==='pos'&&<QuickSaleView/>} {currentTab==='products'&&<ProductsView selectedVariantId={selectedVariantId} onClearSelectedVariant={()=>setSelectedVariantId(undefined)}/>} {currentTab==='customers'&&<CustomersView selectedCustomerId={selectedCustomerId} onClearSelectedCustomer={()=>setSelectedCustomerId(undefined)}/>} {currentTab==='production'&&<ProductionView/>} {currentTab==='livestock'&&<LivestockView/>} {currentTab==='money'&&<MoneyView/>} {currentTab==='documents'&&<DocumentsView/>} {currentTab==='reports'&&<ReportsView/>} {currentTab==='suppliers'&&<SuppliersView/>} {currentTab==='audit'&&<AuditView/>} {currentTab==='settings'&&<SettingsView currentLang={currentLang} onLanguageChange={setCurrentLang}/>} 
+    </main></div>
+    <BottomNav currentTab={currentTab} onSelectTab={tab=>handleNavigate(tab)} onOpenQuickActions={()=>setIsQuickActionsOpen(true)} onOpenMoreMenu={()=>setIsMoreMenuOpen(true)} currentLang={currentLang} pendingOrdersCount={pendingOrdersCount}/>
+    <QuickActionModal isOpen={isQuickActionsOpen} onClose={()=>setIsQuickActionsOpen(false)} onAction={handleQuickAction} currentLang={currentLang}/><GlobalSearchModal isOpen={isSearchOpen} onClose={()=>setIsSearchOpen(false)} onNavigate={handleNavigate}/><NotificationDrawer isOpen={isNotificationsOpen} onClose={()=>setIsNotificationsOpen(false)} onNavigate={handleNavigate}/><MoreMenuModal isOpen={isMoreMenuOpen} onClose={()=>setIsMoreMenuOpen(false)} onSelectTab={tab=>handleNavigate(tab)} currentTab={currentTab}/><BarcodeScannerModal isOpen={isScannerOpen} onClose={()=>setIsScannerOpen(false)} onScan={handleBarcodeScanResult}/>{isCreateOrderModalOpen&&<CreateOrderModal isOpen={isCreateOrderModalOpen} onClose={()=>setIsCreateOrderModalOpen(false)} onOrderCreated={orderId=>{setCurrentTab('orders');setSelectedOrderId(orderId);}}/>}<SyncStatusPill/>
+  </div>;
 }
