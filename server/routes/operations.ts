@@ -41,6 +41,8 @@ router.post('/deliveries', requireRole('owner','manager','worker'), async (req, 
     const created = await transaction(async client => {
       const order = await client.query(`SELECT * FROM orders WHERE id=$1 FOR UPDATE`, [orderId]);
       if (!order.rows[0]) throw new Error('Order not found');
+      if (String(order.rows[0].status) === 'cancelled') throw new Error('Cannot deliver a cancelled order');
+      if (['delivered','invoiced','paid'].includes(String(order.rows[0].status))) throw new Error('Order is already fully delivered');
 
       const number = await nextNumber(client, 'delivery_number', 'BL-');
       const delivery = await client.query(
@@ -56,47 +58,25 @@ router.post('/deliveries', requireRole('owner','manager','worker'), async (req, 
         if (!variantId || !Number.isFinite(qty) || qty <= 0) throw new Error('Invalid delivery quantity');
         if (seenVariants.has(variantId)) throw new Error(`Duplicate delivery line for variant ${variantId}`);
         seenVariants.add(variantId);
-
-        const oi = await client.query(
-          `SELECT id, quantity, delivered_quantity FROM order_items WHERE order_id=$1 AND variant_id=$2 FOR UPDATE`,
-          [orderId, variantId]
-        );
+        const oi = await client.query(`SELECT id, quantity, delivered_quantity FROM order_items WHERE order_id=$1 AND variant_id=$2 FOR UPDATE`, [orderId, variantId]);
         if (!oi.rows[0]) throw new Error('Variant is not part of the order');
-
         const remaining = Number(oi.rows[0].quantity) - Number(oi.rows[0].delivered_quantity);
         if (qty > remaining) throw new Error('Delivery exceeds remaining order quantity');
-
-        const stock = await client.query(
-          `SELECT quantity,reserved_quantity FROM inventory_balances WHERE variant_id=$1 FOR UPDATE`,
-          [variantId]
-        );
-        if (!stock.rows[0] || Number(stock.rows[0].quantity) < qty || Number(stock.rows[0].reserved_quantity) < qty) {
-          throw new Error('Insufficient reserved stock for delivery');
-        }
-
+        const stock = await client.query(`SELECT quantity,reserved_quantity FROM inventory_balances WHERE variant_id=$1 FOR UPDATE`, [variantId]);
+        if (!stock.rows[0] || Number(stock.rows[0].quantity) < qty || Number(stock.rows[0].reserved_quantity) < qty) throw new Error('Insufficient reserved stock for delivery');
         await client.query(`INSERT INTO delivery_items(delivery_id,variant_id,quantity) VALUES($1,$2,$3)`, [delivery.rows[0].id, variantId, qty]);
         await client.query(`UPDATE order_items SET delivered_quantity=delivered_quantity+$2 WHERE id=$1`, [oi.rows[0].id, qty]);
         await client.query(`UPDATE inventory_balances SET quantity=quantity-$2,reserved_quantity=reserved_quantity-$2,updated_at=NOW() WHERE variant_id=$1`, [variantId, qty]);
-        await client.query(
-          `INSERT INTO inventory_movements(variant_id,movement_type,quantity,reference_type,reference_id,idempotency_key,created_by)
-           VALUES($1,'delivery',$2,'delivery',$3,$4,$5)`,
-          [variantId, -qty, delivery.rows[0].id, `delivery:${delivery.rows[0].id}:${variantId}`, req.user!.id]
-        );
+        await client.query(`INSERT INTO inventory_movements(variant_id,movement_type,quantity,reference_type,reference_id,idempotency_key,created_by) VALUES($1,'delivery',$2,'delivery',$3,$4,$5)`, [variantId, -qty, delivery.rows[0].id, `delivery:${delivery.rows[0].id}:${variantId}`, req.user!.id]);
       }
 
-      const remainingItems = await client.query<{ count: string }>(
-        `SELECT COUNT(*)::text AS count FROM order_items WHERE order_id=$1 AND delivered_quantity < quantity`,
-        [orderId]
-      );
+      const remainingItems = await client.query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM order_items WHERE order_id=$1 AND delivered_quantity < quantity`, [orderId]);
       const allDelivered = Number(remainingItems.rows[0]?.count ?? 0) === 0;
       const status = allDelivered ? 'delivered' : 'partially_delivered';
-
       await client.query(`UPDATE deliveries SET status=$2 WHERE id=$1`, [delivery.rows[0].id, status]);
       await client.query(`UPDATE orders SET status=$2, updated_at=NOW() WHERE id=$1`, [orderId, status]);
-
       return { ...delivery.rows[0], status };
     });
-
     res.status(201).json(created);
   } catch (e) { next(e); }
 });
@@ -127,6 +107,9 @@ router.post('/invoices/from-order/:orderId', requireRole('owner','manager'), asy
     const invoice = await transaction(async client => {
       const order = await client.query(`SELECT * FROM orders WHERE id=$1 FOR UPDATE`, [req.params.orderId]);
       if (!order.rows[0]) throw new Error('Order not found');
+      const orderStatus = String(order.rows[0].status);
+      if (orderStatus === 'cancelled') throw new Error('Cannot invoice a cancelled order');
+      if (!['ready','partially_delivered','delivered'].includes(orderStatus)) throw new Error(`Order is not ready for invoicing from status ${orderStatus}`);
       const existing = await client.query(`SELECT id,number FROM invoices WHERE order_id=$1 AND status <> 'cancelled' LIMIT 1`, [req.params.orderId]);
       if (existing.rows[0]) return existing.rows[0];
       const number = await nextNumber(client,'invoice_number','FAC-');
