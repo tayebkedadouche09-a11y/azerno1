@@ -14,6 +14,10 @@ export async function flushCoreCreateQueue(){
  const deviceId=getDeviceId();let applied=0,rejected=0;
  for(const operation of pending){
   try{
+   if(operation.entity==='expense' && operation.action==='create'){
+    await api.createExpense({...(operation.payload as Record<string, unknown>),idempotencyKey:operation.id});
+    offlineQueue.remove(operation.id); applied++; continue;
+   }
    const result=await api.syncPush(deviceId,[{operationId:operation.id,entityType:operation.entity,operationType:operation.action,payload:operation.payload}]);
    if(result.accepted.includes(operation.id)||result.duplicates.includes(operation.id)){offlineQueue.remove(operation.id);applied++;continue;}
    const failure=result.rejected.find(item=>item.operationId===operation.id);
