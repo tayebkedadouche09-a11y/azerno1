@@ -7,7 +7,18 @@ router.use(requireAuth);
 
 router.get('/customers', async (_req, res, next) => {
   try {
-    const result = await query('SELECT * FROM customers WHERE active = TRUE ORDER BY name');
+    const result = await query(`
+      SELECT
+        c.*,
+        COALESCE(SUM(o.total), 0) AS total_purchases,
+        COALESCE(SUM(o.paid_total), 0) AS total_paid,
+        GREATEST(COALESCE(SUM(o.total - o.paid_total), 0), 0) AS outstanding_balance
+      FROM customers c
+      LEFT JOIN orders o ON o.customer_id = c.id AND o.status <> 'cancelled'
+      WHERE c.active = TRUE
+      GROUP BY c.id
+      ORDER BY c.name
+    `);
     res.json({ items: result.rows });
   } catch (error) { next(error); }
 });
@@ -17,23 +28,69 @@ router.post('/customers', async (req, res, next) => {
     const name = String(req.body?.name ?? '').trim();
     if (!name) return res.status(400).json({ error: 'Customer name is required' });
     const result = await query(
-      `INSERT INTO customers(name, phone, address, notes) VALUES ($1,$2,$3,$4) RETURNING *`,
-      [name, req.body?.phone ?? null, req.body?.address ?? null, req.body?.notes ?? null],
+      `INSERT INTO customers(name, phone, address, notes, customer_type, credit_limit, payment_terms_days, custom_prices)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       RETURNING *`,
+      [
+        name,
+        req.body?.phone ?? null,
+        req.body?.address ?? null,
+        req.body?.notes ?? null,
+        req.body?.type ?? 'wholesale',
+        Number(req.body?.creditLimit ?? 0),
+        Number(req.body?.paymentTermsDays ?? 0),
+        req.body?.customPrices ?? {},
+      ],
     );
-    res.status(201).json(result.rows[0]);
+    res.status(201).json({
+      ...result.rows[0],
+      total_purchases: 0,
+      total_paid: 0,
+      outstanding_balance: 0,
+    });
   } catch (error) { next(error); }
 });
 
 router.get('/products', async (_req, res, next) => {
   try {
     const result = await query(`
-      SELECT p.*, c.name AS category_name,
-        COALESCE(json_agg(v ORDER BY v.name) FILTER (WHERE v.id IS NOT NULL), '[]') AS variants
+      SELECT
+        p.*,
+        c.name AS category_name,
+        c.name_ar AS category_name_ar,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'id', v.id,
+              'product_id', v.product_id,
+              'name', v.name,
+              'sku', v.sku,
+              'barcode', v.barcode,
+              'unit', v.unit,
+              'weight_grams', v.weight_grams,
+              'package_type', v.package_type,
+              'retail_price', v.retail_price,
+              'wholesale_price', v.wholesale_price,
+              'production_cost', v.production_cost,
+              'min_stock', v.min_stock,
+              'min_order_qty', v.min_order_qty,
+              'expiry_days', v.expiry_days,
+              'image_url', v.image_url,
+              'active', v.active,
+              'created_at', v.created_at,
+              'quantity', COALESCE(ib.quantity, 0),
+              'reserved_quantity', COALESCE(ib.reserved_quantity, 0),
+              'available_quantity', COALESCE(ib.quantity, 0) - COALESCE(ib.reserved_quantity, 0)
+            ) ORDER BY v.name
+          ) FILTER (WHERE v.id IS NOT NULL),
+          '[]'::json
+        ) AS variants
       FROM products p
       LEFT JOIN product_categories c ON c.id = p.category_id
       LEFT JOIN product_variants v ON v.product_id = p.id AND v.active = TRUE
+      LEFT JOIN inventory_balances ib ON ib.variant_id = v.id
       WHERE p.active = TRUE
-      GROUP BY p.id, c.name
+      GROUP BY p.id, c.name, c.name_ar
       ORDER BY p.name
     `);
     res.json({ items: result.rows });
@@ -48,8 +105,8 @@ router.post('/products', requireRole('owner', 'manager'), async (req, res, next)
 
     const result = await transaction(async (client) => {
       const product = await client.query(
-        `INSERT INTO products(name, name_ar) VALUES ($1,$2) RETURNING *`,
-        [name, req.body?.nameAr ?? null],
+        `INSERT INTO products(name, name_ar, category_id) VALUES ($1,$2,$3) RETURNING *`,
+        [name, req.body?.nameAr ?? null, req.body?.categoryId ?? null],
       );
       const createdVariant = await client.query(
         `INSERT INTO product_variants(
@@ -73,12 +130,33 @@ router.post('/products', requireRole('owner', 'manager'), async (req, res, next)
 router.get('/orders', async (_req, res, next) => {
   try {
     const result = await query(`
-      SELECT o.*, c.name AS customer_name,
-        COALESCE(json_agg(oi ORDER BY oi.id) FILTER (WHERE oi.id IS NOT NULL), '[]') AS items
+      SELECT
+        o.*,
+        c.name AS customer_name,
+        c.phone AS customer_phone,
+        c.address AS customer_address,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'id', oi.id,
+              'variant_id', oi.variant_id,
+              'product_name', COALESCE(v.name, 'Produit'),
+              'unit', v.unit,
+              'quantity', oi.quantity,
+              'delivered_quantity', oi.delivered_quantity,
+              'unit_price', oi.unit_price,
+              'unit_cost', oi.unit_cost,
+              'discount', oi.discount,
+              'subtotal', (oi.quantity * oi.unit_price) - oi.discount
+            ) ORDER BY oi.id
+          ) FILTER (WHERE oi.id IS NOT NULL),
+          '[]'::json
+        ) AS items
       FROM orders o
       LEFT JOIN customers c ON c.id = o.customer_id
       LEFT JOIN order_items oi ON oi.order_id = o.id
-      GROUP BY o.id, c.name
+      LEFT JOIN product_variants v ON v.id = oi.variant_id
+      GROUP BY o.id, c.name, c.phone, c.address
       ORDER BY o.created_at DESC
     `);
     res.json({ items: result.rows });
@@ -127,8 +205,8 @@ router.post('/orders', async (req, res, next) => {
 
         const unitPrice = Number(item.unitPrice ?? variant.retail_price);
         const unitCost = Number(variant.production_cost);
-        const discount = Number(item.discount ?? 0);
-        if (unitPrice < 0 || discount < 0) throw new Error('Invalid price or discount');
+        const discount = Number(item.discount ?? item.discountPercent ?? 0);
+        if (unitPrice < 0 || discount < 0 || discount > quantity * unitPrice) throw new Error('Invalid price or discount');
         subtotal += quantity * unitPrice - discount;
         costTotal += quantity * unitCost;
         normalized.push({ variantId: item.variantId, quantity, unitPrice, unitCost, discount });
