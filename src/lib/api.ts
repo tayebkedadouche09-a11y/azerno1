@@ -27,6 +27,7 @@ export const api={
  createProduct:(payload:unknown)=>request('/business/products',{method:'POST',body:JSON.stringify(payload)}),
  updateVariant:(variantId:string,payload:unknown)=>request(`/business-core/variants/${encodeURIComponent(variantId)}`,{method:'PATCH',body:JSON.stringify(payload)}),
  adjustStock:(payload:unknown)=>request('/business-core/stock-adjustments',{method:'POST',body:JSON.stringify(payload)}),
+ updateOrderStatus:(orderId:string,status:string)=>request(`/business-core/orders/${encodeURIComponent(orderId)}/status`,{method:'PATCH',body:JSON.stringify({status})}),
  createOrder:(payload:unknown)=>request('/business/orders',{method:'POST',body:JSON.stringify(payload)}),
  createPayment:(payload:unknown)=>request('/business/payments',{method:'POST',body:JSON.stringify(payload)}),
  createExpense:(payload:unknown)=>request('/finance/expenses',{method:'POST',body:JSON.stringify(payload)}),
