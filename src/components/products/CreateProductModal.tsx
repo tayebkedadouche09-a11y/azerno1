@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { X, PackagePlus } from 'lucide-react';
 import { dataRepository } from '../../lib/dataRepository';
-import { ProductVariant, UnitType } from '../../types';
+import { UnitType } from '../../types';
 import { triggerHaptic } from '../../lib/utils';
 
 type Category = { id: string; name: string };
@@ -77,7 +77,7 @@ export const CreateProductModal: React.FC<CreateProductModalProps> = ({ categori
             <div className="text-xs font-black uppercase tracking-wider text-slate-500">Première déclinaison</div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div><label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">Nom / format *</label><input className={field} value={variantName} onChange={e => setVariantName(e.target.value)} placeholder="Ex. 500 g" required /></div>
-              <div><label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">Unité *</label><select className={field} value={unit} onChange={e => setUnit(e.target.value as UnitType)}><option value="piece">Pièce</option><option value="kg">kg</option><option value="liter">Litre</option><option value="gram">Gramme</option><option value="box">Carton</option></select></div>
+              <div><label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">Unité *</label><select className={field} value={unit} onChange={e => setUnit(e.target.value as UnitType)}><option value="piece">Pièce</option><option value="kg">kg</option><option value="g">Gramme</option><option value="litre">Litre</option><option value="pot">Pot</option><option value="pack5">Pack 5</option><option value="pack10">Pack 10</option><option value="carton">Carton</option></select></div>
               <div><label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">SKU</label><input className={field} value={sku} onChange={e => setSku(e.target.value)} placeholder="SKU-001" /></div>
               <div><label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">Code-barres</label><input className={field} value={barcode} onChange={e => setBarcode(e.target.value)} /></div>
               <div><label className="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1">Prix détail (DA)</label><input className={field} type="number" min="0" step="0.01" value={retailPrice} onChange={e => setRetailPrice(Number(e.target.value) || 0)} /></div>
