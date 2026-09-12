@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { db } from './lib/storage';
 import { api, getAccessToken } from './lib/api';
 import { startCoreDataSync } from './lib/coreDataSync';
+import { bootstrapFinanceBridge } from './lib/financeBridge';
 import { AppLanguage, User } from './types';
 import { Header } from './components/layout/Header';
 import { BottomNav, MainTab } from './components/layout/BottomNav';
@@ -33,6 +34,7 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<User>(() => db.getCurrentUser());
   const [appState, setAppState] = useState(() => db.getState());
   const [serverSessionReady, setServerSessionReady] = useState(false);
+  const [financeReady, setFinanceReady] = useState(false);
   const [isQuickActionsOpen, setIsQuickActionsOpen] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
@@ -44,6 +46,7 @@ export default function App() {
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | undefined>(undefined);
 
   useEffect(() => { let active=true; const bootstrapSession=async()=>{ if(!getAccessToken()){if(active)setServerSessionReady(true);return;} try{const result=await api.me();if(!active)return;setCurrentUser({id:result.user.id,name:result.user.name,role:result.user.role,pin:'',active:true});}catch{await api.logout().catch(()=>undefined);}finally{if(active)setServerSessionReady(true);}};void bootstrapSession();return()=>{active=false;}; }, []);
+  useEffect(() => { let active=true; void bootstrapFinanceBridge().finally(()=>{if(active)setFinanceReady(true);}); return()=>{active=false;}; }, []);
   useEffect(() => startCoreDataSync(() => setAppState({ ...db.getState() })), []);
   useEffect(() => { const unsubscribe=db.subscribe(()=>{setAppState({...db.getState()});setCurrentUser(db.getCurrentUser());});return()=>unsubscribe(); }, []);
   useEffect(() => { const handleKeyDown=(e:KeyboardEvent)=>{if((e.ctrlKey||e.metaKey)&&e.key==='k'){e.preventDefault();setIsSearchOpen(p=>!p);}};window.addEventListener('keydown',handleKeyDown);return()=>window.removeEventListener('keydown',handleKeyDown); }, []);
@@ -53,7 +56,7 @@ export default function App() {
   const handleQuickAction=(key:'new_order'|'quick_sale'|'new_batch'|'new_expense'|'record_payment'|'scan_code')=>{if(key==='new_order')setIsCreateOrderModalOpen(true);else if(key==='quick_sale')setCurrentTab('pos');else if(key==='new_batch')setCurrentTab('production');else if(key==='new_expense')setCurrentTab('money');else if(key==='record_payment')setCurrentTab('customers');else setIsScannerOpen(true);};
   const handleBarcodeScanResult=(code:string)=>{const matched=db.getVariantByBarcodeOrSku(code);if(matched){setCurrentTab('products');setSelectedVariantId(matched.id);alert(`Produit identifié : ${matched.name} (Stock: ${matched.currentStock} ${matched.unit})`);}else alert(`Code scanné : "${code}" — Aucun article correspondant trouvé.`);};
   const pendingOrdersCount=appState.orders.filter(o=>['confirmed','preparing','ready'].includes(o.status)).length;
-  if(!serverSessionReady)return <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 text-sm text-slate-500">Connexion sécurisée AZRNOU...</div>;
+  if(!serverSessionReady || !financeReady)return <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 text-sm text-slate-500">Connexion sécurisée AZRNOU...</div>;
   return <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors">
     <Header currentLang={currentLang} onLanguageChange={setCurrentLang} currentUser={currentUser} onUserChange={handleUserChange} onOpenSearch={()=>setIsSearchOpen(true)} onOpenNotifications={()=>setIsNotificationsOpen(true)} onOpenBarcodeScanner={()=>setIsScannerOpen(true)} />
     <div className="flex-1 flex flex-row"><Sidebar currentTab={currentTab} onSelectTab={tab=>handleNavigate(tab)} onOpenQuickActions={()=>setIsQuickActionsOpen(true)} currentLang={currentLang} pendingOrdersCount={pendingOrdersCount}/><main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 pb-24 lg:pb-12 overflow-x-hidden">
