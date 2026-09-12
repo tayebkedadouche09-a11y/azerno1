@@ -20,9 +20,10 @@ router.post('/expenses', requireRole('owner','manager'), async (req,res,next) =>
   try {
     const category=String(req.body?.category??'').trim(); const amount=Number(req.body?.amount);
     if(!category || !Number.isFinite(amount) || amount<0) return res.status(400).json({error:'Category and valid non-negative amount are required'});
+    const idempotencyKey = req.body?.idempotencyKey ? String(req.body.idempotencyKey) : null;
     const result=await transaction(async client=>{
-      const r=await client.query(`INSERT INTO expenses(category,amount,expense_date,supplier_id,note,created_by) VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,[category,amount,req.body?.date??new Date().toISOString().slice(0,10),req.body?.supplierId??null,req.body?.note??null,req.user!.id]);
-      await client.query(`INSERT INTO audit_logs(user_id,action,entity_type,entity_id,after_data) VALUES($1,'create','expense',$2,$3)`,[req.user!.id,r.rows[0].id,JSON.stringify(r.rows[0])]); return r.rows[0];
+      const r=await client.query(`INSERT INTO expenses(id,category,amount,expense_date,supplier_id,note,created_by,idempotency_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(idempotency_key) DO UPDATE SET id=expenses.id RETURNING *`,[req.body?.id ?? undefined,category,amount,req.body?.date??new Date().toISOString().slice(0,10),req.body?.supplierId??null,req.body?.note??null,req.user!.id,idempotencyKey]);
+      await client.query(`INSERT INTO audit_logs(user_id,action,entity_type,entity_id,after_data) VALUES($1,'create','expense',$2,$3) ON CONFLICT DO NOTHING`,[req.user!.id,r.rows[0].id,JSON.stringify(r.rows[0])]); return r.rows[0];
     }); res.status(201).json(result);
   } catch(e){next(e);}
 });
