@@ -2,9 +2,145 @@ import { Router } from 'express';
 import { query, transaction } from '../db.js';
 import { requireAuth } from '../middleware/auth.js';
 
-const router=Router(); router.use(requireAuth);
-const allowedEntities=new Set(['customer','supplier','product','variant','order','payment','expense','purchase','production','livestock_event','feed','return','waste']);
-router.post('/push',async(req,res,next)=>{try{const deviceId=String(req.body?.deviceId??'').trim(),operations=Array.isArray(req.body?.operations)?req.body.operations:[];if(!deviceId||!operations.length)return res.status(400).json({error:'deviceId and operations are required'});const result=await transaction(async client=>{const accepted:string[]=[],duplicates:string[]=[],rejected:Array<{operationId:string;reason:string}>=[];for(const op of operations){const id=String(op?.operationId??'');const entity=String(op?.entityType??'');if(!id||!allowedEntities.has(entity)){rejected.push({operationId:id,reason:'Unsupported or invalid operation'});continue;}const existing=await client.query('SELECT status FROM sync_operations WHERE operation_id=$1',[id]);if(existing.rows[0]){duplicates.push(id);continue;}await client.query(`INSERT INTO sync_operations(device_id,operation_id,entity_type,entity_id,operation_type,payload,status,applied_at) VALUES($1,$2,$3,$4,$5,$6,'applied',NOW())`,[deviceId,id,entity,op.entityId??null,String(op.operationType??'create'),JSON.stringify(op.payload??{})]);accepted.push(id);}return{accepted,duplicates,rejected};});res.json(result);}catch(e){next(e);}});
-router.get('/pull',async(req,res,next)=>{try{const since=String(req.query.since??'1970-01-01T00:00:00.000Z'),deviceId=String(req.query.deviceId??'');const r=await query(`SELECT operation_id,device_id,entity_type,entity_id,operation_type,payload,status,created_at,applied_at FROM sync_operations WHERE created_at>$1 AND ($2='' OR device_id<>$2) ORDER BY created_at ASC LIMIT 500`,[since,deviceId]);res.json({items:r.rows,nextSince:new Date().toISOString()});}catch(e){next(e);}});
-router.get('/status',async(req,res,next)=>{try{const deviceId=String(req.query.deviceId??'');const r=await query(`SELECT COUNT(*)::int AS total,COUNT(*) FILTER(WHERE status='pending')::int AS pending,COUNT(*) FILTER(WHERE status='rejected')::int AS rejected,MAX(created_at) AS last_operation FROM sync_operations WHERE ($1='' OR device_id=$1)`,[deviceId]);res.json(r.rows[0]);}catch(e){next(e);}});
+const router = Router();
+router.use(requireAuth);
+const allowedEntities = new Set(['customer','supplier','product','variant','order','payment','expense','purchase','production','livestock_event','feed','return','waste']);
+
+type SyncOperation = {
+  operationId: string;
+  entityType: string;
+  entityId?: string | null;
+  operationType?: 'create' | 'update' | 'delete';
+  payload?: Record<string, any>;
+};
+
+async function nextNumber(client: import('pg').PoolClient, key: string, prefix: string) {
+  const row = await client.query<{ value: { counter?: number } }>('SELECT value FROM app_settings WHERE key=$1 FOR UPDATE', [key]);
+  const counter = Number(row.rows[0]?.value?.counter ?? 0) + 1;
+  await client.query(`INSERT INTO app_settings(key,value) VALUES ($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()`, [key, JSON.stringify({ counter })]);
+  return `${prefix}${String(counter).padStart(6, '0')}`;
+}
+
+async function applyCreate(client: import('pg').PoolClient, op: SyncOperation, userId: string) {
+  const p = op.payload ?? {};
+  const id = String(p.id ?? op.entityId ?? '').trim();
+  if (!id) throw new Error('Create operation requires a stable id');
+
+  if (op.entityType === 'customer') {
+    await client.query(`INSERT INTO customers(id,name,phone,address,notes,customer_type,credit_limit,payment_terms_days,custom_prices) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO NOTHING`, [id, String(p.name ?? '').trim(), p.phone ?? null, p.address ?? null, p.notes ?? null, p.type ?? 'wholesale', Number(p.creditLimit ?? 0), Number(p.paymentTermsDays ?? 0), p.customPrices ?? {}]);
+    return;
+  }
+
+  if (op.entityType === 'product') {
+    const variant = p.variant ?? p;
+    const productId = id;
+    const variantId = String(variant.id ?? crypto.randomUUID());
+    if (!String(p.name ?? '').trim() || !variant.name || !variant.unit) throw new Error('Product name and variant name/unit are required');
+    await client.query(`INSERT INTO products(id,name,name_ar,category_id) VALUES($1,$2,$3,$4) ON CONFLICT(id) DO NOTHING`, [productId, String(p.name).trim(), p.nameAr ?? null, p.categoryId ?? null]);
+    await client.query(`INSERT INTO product_variants(id,product_id,name,sku,barcode,unit,weight_grams,package_type,retail_price,wholesale_price,production_cost,min_stock,min_order_qty,expiry_days,image_url) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(id) DO NOTHING`, [variantId, productId, variant.name, variant.sku ?? null, variant.barcode ?? null, variant.unit, variant.weightGrams ?? null, variant.packageType ?? null, Number(variant.retailPrice ?? 0), Number(variant.wholesalePrice ?? 0), Number(variant.productionCost ?? 0), Number(variant.minStock ?? 0), Number(variant.minOrderQty ?? 1), variant.expiryDays ?? null, variant.imageUrl ?? variant.image ?? null]);
+    await client.query(`INSERT INTO inventory_balances(variant_id) VALUES($1) ON CONFLICT DO NOTHING`, [variantId]);
+    return;
+  }
+
+  if (op.entityType === 'order') {
+    const items = Array.isArray(p.items) ? p.items : [];
+    if (!items.length) throw new Error('Order requires at least one item');
+    const existing = await client.query('SELECT id FROM orders WHERE id=$1', [id]);
+    if (existing.rows[0]) return;
+    let subtotal = 0;
+    let costTotal = 0;
+    const normalized: Array<{ variantId: string; quantity: number; unitPrice: number; unitCost: number; discount: number }> = [];
+    for (const item of items) {
+      const quantity = Number(item.quantity);
+      if (!item.variantId || !Number.isFinite(quantity) || quantity <= 0) throw new Error('Invalid order quantity');
+      const variant = await client.query(`SELECT id,retail_price,production_cost FROM product_variants WHERE id=$1 AND active=TRUE FOR SHARE`, [item.variantId]);
+      if (!variant.rows[0]) throw new Error(`Product variant not found: ${item.variantId}`);
+      const balance = await client.query(`SELECT quantity,reserved_quantity FROM inventory_balances WHERE variant_id=$1 FOR UPDATE`, [item.variantId]);
+      const available = Number(balance.rows[0]?.quantity ?? 0) - Number(balance.rows[0]?.reserved_quantity ?? 0);
+      if (available < quantity) throw new Error(`Insufficient available stock for variant ${item.variantId}`);
+      const unitPrice = Number(item.unitPrice ?? variant.rows[0].retail_price);
+      const unitCost = Number(variant.rows[0].production_cost);
+      const discount = Number(item.discount ?? item.discountPercent ?? 0);
+      if (unitPrice < 0 || discount < 0 || discount > quantity * unitPrice) throw new Error('Invalid price or discount');
+      subtotal += quantity * unitPrice - discount;
+      costTotal += quantity * unitCost;
+      normalized.push({ variantId: item.variantId, quantity, unitPrice, unitCost, discount });
+    }
+    const number = await nextNumber(client, 'order_number', 'BC-');
+    await client.query(`INSERT INTO orders(id,number,customer_id,status,payment_status,delivery_date,subtotal,total,cost_total,created_by) VALUES($1,$2,$3,'confirmed','unpaid',$4,$5,$6,$7,$8)`, [id, number, p.customerId ?? null, p.deliveryDate ?? null, subtotal, subtotal, costTotal, userId]);
+    for (const item of normalized) {
+      await client.query(`INSERT INTO order_items(order_id,variant_id,quantity,unit_price,unit_cost,discount) VALUES($1,$2,$3,$4,$5,$6)`, [id, item.variantId, item.quantity, item.unitPrice, item.unitCost, item.discount]);
+      await client.query(`UPDATE inventory_balances SET reserved_quantity=reserved_quantity+$2,updated_at=NOW() WHERE variant_id=$1`, [item.variantId, item.quantity]);
+      await client.query(`INSERT INTO inventory_movements(variant_id,movement_type,quantity,reference_type,reference_id,idempotency_key,created_by) VALUES($1,'order_reservation',$2,'order',$3,$4,$5) ON CONFLICT(idempotency_key) DO NOTHING`, [item.variantId, item.quantity, id, `order:${id}:${item.variantId}`, userId]);
+    }
+    await client.query(`INSERT INTO audit_logs(user_id,action,entity_type,entity_id,after_data) VALUES($1,'create','order',$2,$3)`, [userId, id, JSON.stringify({ id, total: subtotal })]);
+    return;
+  }
+
+  if (op.entityType === 'payment') {
+    const orderId = String(p.orderId ?? '');
+    const amount = Number(p.amount);
+    if (!orderId || !Number.isFinite(amount) || amount <= 0) throw new Error('Order and positive payment amount are required');
+    const existing = await client.query('SELECT id FROM payments WHERE idempotency_key=$1', [op.operationId]);
+    if (existing.rows[0]) return;
+    const order = await client.query(`SELECT id,customer_id,total,paid_total FROM orders WHERE id=$1 FOR UPDATE`, [orderId]);
+    if (!order.rows[0]) throw new Error('Order not found');
+    const remaining = Number(order.rows[0].total) - Number(order.rows[0].paid_total);
+    if (amount > remaining) throw new Error('Payment exceeds outstanding balance');
+    await client.query(`INSERT INTO payments(id,customer_id,order_id,amount,method,note,idempotency_key,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [id, order.rows[0].customer_id, orderId, amount, String(p.method ?? 'cash'), p.note ?? null, op.operationId, userId]);
+    const paid = Number(order.rows[0].paid_total) + amount;
+    const status = paid >= Number(order.rows[0].total) ? 'paid' : 'partially_paid';
+    await client.query(`UPDATE orders SET paid_total=$2,payment_status=$3,status=CASE WHEN status='delivered' AND $2>=total THEN 'paid' ELSE status END,updated_at=NOW() WHERE id=$1`, [orderId, paid, status]);
+    return;
+  }
+
+  throw new Error(`Create sync for ${op.entityType} is not implemented`);
+}
+
+router.post('/push', async (req, res, next) => {
+  try {
+    const deviceId = String(req.body?.deviceId ?? '').trim();
+    const operations = Array.isArray(req.body?.operations) ? req.body.operations as SyncOperation[] : [];
+    if (!deviceId || !operations.length) return res.status(400).json({ error: 'deviceId and operations are required' });
+    const result = await transaction(async client => {
+      const accepted: string[] = [], duplicates: string[] = [], rejected: Array<{ operationId: string; reason: string }> = [];
+      for (const op of operations) {
+        const id = String(op?.operationId ?? '').trim();
+        const entity = String(op?.entityType ?? '').trim();
+        const operationType = op.operationType ?? 'create';
+        if (!id || !allowedEntities.has(entity) || !['create','update','delete'].includes(operationType)) { rejected.push({ operationId: id, reason: 'Unsupported or invalid operation' }); continue; }
+        const existing = await client.query('SELECT status FROM sync_operations WHERE operation_id=$1', [id]);
+        if (existing.rows[0]) { duplicates.push(id); continue; }
+        try {
+          if (operationType !== 'create') throw new Error('Only create operations are currently supported by the safe core sync engine');
+          await applyCreate(client, { ...op, operationType }, req.user!.id);
+          await client.query(`INSERT INTO sync_operations(device_id,operation_id,entity_type,entity_id,operation_type,payload,status,applied_at) VALUES($1,$2,$3,$4,$5,$6,'applied',NOW())`, [deviceId,id,entity,op.entityId ?? op.payload?.id ?? null,operationType,JSON.stringify(op.payload ?? {})]);
+          accepted.push(id);
+        } catch (error) {
+          rejected.push({ operationId: id, reason: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      return { accepted, duplicates, rejected };
+    });
+    res.json(result);
+  } catch (e) { next(e); }
+});
+
+router.get('/pull', async (req, res, next) => {
+  try {
+    const since = String(req.query.since ?? '1970-01-01T00:00:00.000Z');
+    const deviceId = String(req.query.deviceId ?? '');
+    const r = await query(`SELECT operation_id,device_id,entity_type,entity_id,operation_type,payload,status,created_at,applied_at FROM sync_operations WHERE created_at>$1 AND ($2='' OR device_id<>$2) ORDER BY created_at ASC LIMIT 500`, [since, deviceId]);
+    res.json({ items: r.rows, nextSince: new Date().toISOString() });
+  } catch (e) { next(e); }
+});
+
+router.get('/status', async (req, res, next) => {
+  try {
+    const deviceId = String(req.query.deviceId ?? '');
+    const r = await query(`SELECT COUNT(*)::int AS total,COUNT(*) FILTER(WHERE status='pending')::int AS pending,COUNT(*) FILTER(WHERE status='rejected')::int AS rejected,MAX(created_at) AS last_operation FROM sync_operations WHERE ($1='' OR device_id=$1)`, [deviceId]);
+    res.json(r.rows[0]);
+  } catch (e) { next(e); }
+});
+
 export default router;
