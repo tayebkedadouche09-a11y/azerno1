@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import authRouter from './routes/auth.js';
+import businessRouter from './routes/business.js';
 import healthRouter from './routes/health.js';
 
 const app = express();
@@ -25,10 +26,13 @@ app.use(express.json({ limit: '1mb' }));
 app.get('/api', (_req, res) => res.json({ name: 'AZRNOU API', version: '1.0.0' }));
 app.use('/api/health', healthRouter);
 app.use('/api/auth', authRouter);
+app.use('/api/business', businessRouter);
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error('[AZRNOU API]', error);
-  res.status(500).json({ error: 'Internal server error' });
+  const message = error instanceof Error ? error.message : 'Internal server error';
+  const status = /not found|insufficient|invalid|exceeds|already initialized|quantity|stock/i.test(message) ? 400 : 500;
+  res.status(status).json({ error: status === 500 ? 'Internal server error' : message });
 });
 
 app.listen(port, '0.0.0.0', () => {
