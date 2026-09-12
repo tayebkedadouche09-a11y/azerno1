@@ -10,11 +10,27 @@ export type QueueOperation = {
 };
 
 const KEY = 'azrnou_offline_queue_v2';
+const LEGACY_KEY = 'azrnou_offline_queue_v1';
+
+function parse(raw: string | null): QueueOperation[] {
+  try {
+    return raw ? (JSON.parse(raw) as QueueOperation[]) : [];
+  } catch {
+    return [];
+  }
+}
 
 function read(): QueueOperation[] {
   try {
-    const raw = localStorage.getItem(KEY);
-    return raw ? (JSON.parse(raw) as QueueOperation[]) : [];
+    const current = parse(localStorage.getItem(KEY));
+    if (current.length) return current;
+    const legacy = parse(localStorage.getItem(LEGACY_KEY));
+    if (legacy.length) {
+      localStorage.setItem(KEY, JSON.stringify(legacy));
+      localStorage.removeItem(LEGACY_KEY);
+      return legacy;
+    }
+    return [];
   } catch {
     return [];
   }
@@ -50,9 +66,9 @@ export const offlineQueue = {
     write(read().filter(item => item.id !== id));
   },
   retry(id: string) {
-    const item = read().find(operation => operation.id === id);
-    if (!item) return;
-    write(read().map(operation => operation.id === id
+    const items = read();
+    if (!items.some(operation => operation.id === id)) return;
+    write(items.map(operation => operation.id === id
       ? { ...operation, status: 'pending' as const, lastError: undefined }
       : operation));
   },
