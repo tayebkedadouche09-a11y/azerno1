@@ -40,11 +40,10 @@ router.post('/deliveries', requireRole('owner','manager','worker'), async (req, 
         const stock = await client.query(`SELECT quantity,reserved_quantity FROM inventory_balances WHERE variant_id=$1 FOR UPDATE`, [item.variantId]);
         if (!stock.rows[0] || Number(stock.rows[0].quantity) < qty || Number(stock.rows[0].reserved_quantity) < qty) throw new Error('Insufficient reserved stock for delivery');
         await client.query(`INSERT INTO delivery_items(delivery_id,variant_id,quantity) VALUES($1,$2,$3)`, [delivery.rows[0].id, item.variantId, qty]);
-        await client.query(`UPDATE order_items SET delivered_quantity=delivered_quantity+$3 WHERE id=$1`, [oi.rows[0].id, item.variantId, qty]);
+        await client.query(`UPDATE order_items SET delivered_quantity=delivered_quantity+$2 WHERE id=$1`, [oi.rows[0].id, qty]);
         await client.query(`UPDATE inventory_balances SET quantity=quantity-$2,reserved_quantity=reserved_quantity-$2,updated_at=NOW() WHERE variant_id=$1`, [item.variantId, qty]);
         await client.query(`INSERT INTO inventory_movements(variant_id,movement_type,quantity,reference_type,reference_id,idempotency_key,created_by) VALUES($1,'delivery',$2,'delivery',$3,$4,$5)`, [item.variantId, -qty, delivery.rows[0].id, `delivery:${delivery.rows[0].id}:${item.variantId}`, req.user!.id]);
-        const remainingAfter = remaining - qty;
-        if (remainingAfter > 0) allDelivered = false;
+        if (remaining - qty > 0) allDelivered = false;
       }
       const status = allDelivered ? 'delivered' : 'partially_delivered';
       await client.query(`UPDATE deliveries SET status=$2 WHERE id=$1`, [delivery.rows[0].id, status]);
