@@ -1,5 +1,7 @@
 import { api } from './api';
+import { offlineQueue } from './offlineQueue';
 import type { CashRegister, Expense } from '../types';
+import { db } from './storage';
 
 const EXPENSES_KEY = 'azrnou_server_finance_expenses_v1';
 const CASH_KEY = 'azrnou_server_cash_register_v1';
@@ -72,17 +74,21 @@ export async function bootstrapFinanceBridge() {
       createdAt: new Date().toISOString(),
     };
 
-    void api.createExpense({
-      category,
-      amount,
-      date: pending.date,
-      note: pending.notes,
-    }).then((row) => {
+    const payload = { category, amount, date: pending.date, note: pending.notes };
+
+    if (!navigator.onLine) {
+      offlineQueue.enqueue('expense', 'create', payload);
+      write(EXPENSES_KEY, [pending, ...read<Expense[]>(EXPENSES_KEY, [])]);
+      return pending;
+    }
+
+    void api.createExpense(payload).then((row) => {
       const created = mapExpense(row as Record<string, unknown>);
       const current = read<Expense[]>(EXPENSES_KEY, []);
       write(EXPENSES_KEY, [created, ...current.filter(item => item.id !== created.id && item.id !== pending.id)]);
     }).catch(() => {
-      /* Financial mutations are never silently queued as fake local accounting entries. */
+      // Preserve accounting integrity: a failed online mutation is not treated as saved.
+      offlineQueue.enqueue('expense', 'create', payload);
     });
 
     return pending;
@@ -90,6 +96,3 @@ export async function bootstrapFinanceBridge() {
 
   await refreshServerFinance();
 }
-
-// Imported lazily by App after the local storage singleton is available.
-import { db } from './storage';
