@@ -45,7 +45,32 @@ export const api={
  completeProductionBatch:(batchId:string,outputVariantId:string)=>request(`/production/batches/${encodeURIComponent(batchId)}/complete`,{method:'PATCH',body:JSON.stringify({outputVariantId})}),
  createLivestockEvent:(payload:unknown)=>request('/production/livestock/events',{method:'POST',body:JSON.stringify(payload)}),
  createFeed:(payload:unknown)=>request('/production/feed',{method:'POST',body:JSON.stringify(payload)}),
- syncPush:(deviceId:string,operations:unknown[])=>request<SyncPushResult>('/sync/push',{method:'POST',body:JSON.stringify({deviceId,operations})}),
+ syncPush:async(deviceId:string,operations:unknown[])=>{
+   const list = Array.isArray(operations) ? operations as Array<Record<string,any>> : [];
+   const accepted:string[]=[]; const duplicates:string[]=[]; const rejected:Array<{operationId:string;reason:string}>=[];
+   const remoteOperations = [] as Array<Record<string,any>>;
+   for (const operation of list) {
+     if (operation.entityType === 'purchase' && operation.operationType === 'create') {
+       const operationId = String(operation.operationId ?? '');
+       try {
+         const payload = { ...(operation.payload as Record<string,any> ?? {}), idempotencyKey: operationId };
+         await request('/finance/purchases',{method:'POST',body:JSON.stringify(payload)});
+         accepted.push(operationId);
+       } catch (error) {
+         const message = error instanceof Error ? error.message : String(error);
+         if (/idempotency|already exists|duplicate|unique/i.test(message)) duplicates.push(operationId);
+         else rejected.push({ operationId, reason: message });
+       }
+     } else {
+       remoteOperations.push(operation);
+     }
+   }
+   if (remoteOperations.length) {
+     const result = await request<SyncPushResult>('/sync/push',{method:'POST',body:JSON.stringify({deviceId,operations:remoteOperations})});
+     accepted.push(...result.accepted); duplicates.push(...result.duplicates); rejected.push(...result.rejected);
+   }
+   return { accepted, duplicates, rejected };
+ },
  syncPull:(deviceId:string,since:string)=>request<{items:Record<string,unknown>[];nextSince:string}>(`/sync/pull?deviceId=${encodeURIComponent(deviceId)}&since=${encodeURIComponent(since)}`),
  syncStatus:(deviceId:string)=>request<Record<string,unknown>>(`/sync/status?deviceId=${encodeURIComponent(deviceId)}`),
 };
