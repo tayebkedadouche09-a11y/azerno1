@@ -41,55 +41,48 @@ describe('API/DB idempotency one-effect', () => {
         `SELECT column_name FROM information_schema.columns WHERE table_name='orders'`
       );
       const names = new Set(cols.rows.map((r: { column_name: string }) => r.column_name));
-      assert.ok(names.has('idempotency_key'));
 
-      let firstId: string | undefined;
-      try {
-        if (names.has('company_id')) {
-          const a = await client.query(
-            `INSERT INTO orders(number, status, payment_status, subtotal, total, cost_total, idempotency_key, company_id)
-             VALUES ($1,'confirmed','unpaid',10,10,5,$2,$3) RETURNING id`,
-            [`N1-${Date.now()}`, key, companyId]
-          );
-          firstId = a.rows[0].id;
-        } else {
-          const a = await client.query(
-            `INSERT INTO orders(number, status, payment_status, subtotal, total, cost_total, idempotency_key)
-             VALUES ($1,'confirmed','unpaid',10,10,5,$2) RETURNING id`,
-            [`N1-${Date.now()}`, key]
-          );
-          firstId = a.rows[0].id;
-        }
-      } catch (e: any) {
-        await client.query('ROLLBACK');
-        assert.fail(`first order insert failed: ${e.message}`);
+      if (names.has('company_id')) {
+        await client.query(
+          `INSERT INTO orders(number, status, payment_status, subtotal, total, cost_total, idempotency_key, company_id)
+           VALUES ($1,'confirmed','unpaid',10,10,5,$2,$3)`,
+          [`N1-${Date.now()}`, key, companyId]
+        );
+      } else {
+        await client.query(
+          `INSERT INTO orders(number, status, payment_status, subtotal, total, cost_total, idempotency_key)
+           VALUES ($1,'confirmed','unpaid',10,10,5,$2)`,
+          [`N1-${Date.now()}`, key]
+        );
       }
 
+      await client.query('SAVEPOINT sp_dup');
       let duplicateBlocked = false;
       try {
         if (names.has('company_id')) {
           await client.query(
             `INSERT INTO orders(number, status, payment_status, subtotal, total, cost_total, idempotency_key, company_id)
-             VALUES ($1,'confirmed','unpaid',99,99,9,$2,$3) RETURNING id`,
+             VALUES ($1,'confirmed','unpaid',99,99,9,$2,$3)`,
             [`N2-${Date.now()}`, key, companyId]
           );
         } else {
           await client.query(
             `INSERT INTO orders(number, status, payment_status, subtotal, total, cost_total, idempotency_key)
-             VALUES ($1,'confirmed','unpaid',99,99,9,$2) RETURNING id`,
+             VALUES ($1,'confirmed','unpaid',99,99,9,$2)`,
             [`N2-${Date.now()}`, key]
           );
         }
       } catch {
         duplicateBlocked = true;
+        await client.query('ROLLBACK TO SAVEPOINT sp_dup');
       }
 
       const count = await client.query(
         `SELECT COUNT(*)::int AS c FROM orders WHERE idempotency_key=$1`,
         [key]
       );
-      assert.equal(count.rows[0].c, 1, 'must have exactly one order for idempotency key');
-      assert.ok(firstId);
+      assert.equal(count.rows[0].c, 1, 'exactly one order for idempotency key');
+      assert.equal(duplicateBlocked, true, 'second insert must hit unique constraint');
 
       await client.query('ROLLBACK');
     } finally {
@@ -97,7 +90,7 @@ describe('API/DB idempotency one-effect', () => {
     }
   });
 
-  it('payments: idempotency index probe', async () => {
+  it('payments unique index on idempotency_key when column exists', async () => {
     if (!pool) return;
     const hasKey = await pool.query(
       `SELECT 1 FROM information_schema.columns WHERE table_name='payments' AND column_name='idempotency_key'`
@@ -106,18 +99,6 @@ describe('API/DB idempotency one-effect', () => {
     const idx = await pool.query(
       `SELECT indexname FROM pg_indexes WHERE tablename='payments' AND indexdef ILIKE '%idempotency%'`
     );
-    assert.ok(Array.isArray(idx.rows));
-  });
-
-  it('inventory_movements: idempotency column probe', async () => {
-    if (!pool) return;
-    const col = await pool.query(
-      `SELECT 1 FROM information_schema.columns WHERE table_name='inventory_movements' AND column_name='idempotency_key'`
-    );
-    if (!col.rows.length) return;
-    const r = await pool.query(
-      `SELECT indexname FROM pg_indexes WHERE tablename='inventory_movements' AND indexdef ILIKE '%idempotency%'`
-    );
-    assert.ok(Array.isArray(r.rows));
+    assert.ok(idx.rows.length >= 1, 'uq_payments_idempotency_key expected after migration 025');
   });
 });

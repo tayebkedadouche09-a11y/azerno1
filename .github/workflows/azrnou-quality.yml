@@ -33,7 +33,7 @@ jobs:
           node-version: 22
       - name: Install
         run: npm install --no-audit --no-fund
-      - name: Migrations 001-024
+      - name: Migrations 001-025
         run: npm run db:migrate
       - name: TypeScript
         run: npm run lint
