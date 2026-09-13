@@ -38,6 +38,10 @@ async function flushQueueInternal() {
         await api.syncProductionCompletion(payload.batchId, payload.outputVariantId, operation.id);
         offlineQueue.remove(operation.id); applied++; continue;
       }
+      if (operation.entity === 'feed' && operation.action === 'create') {
+        await api.createFeed({ ...(operation.payload as Record<string,unknown>), idempotencyKey:operation.id });
+        offlineQueue.remove(operation.id); applied++; continue;
+      }
       const payload = operation.payload as { id?:string } | null;
       const result = await api.syncPush(deviceId, [{ operationId:operation.id, entityType:operation.entity, operationType:operation.action as 'create'|'update'|'delete', entityId:payload?.id ?? null, payload:operation.payload }]);
       if (result.accepted.includes(operation.id) || result.duplicates.includes(operation.id)) { offlineQueue.remove(operation.id); applied++; continue; }
