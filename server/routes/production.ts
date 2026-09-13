@@ -27,7 +27,6 @@ router.post('/batches', requireRole('owner', 'manager', 'worker'), async (req, r
     const variantId = String(req.body?.outputVariantId ?? '');
     const idempotencyKey = String(req.body?.idempotencyKey ?? req.header('Idempotency-Key') ?? '').trim() || null;
     if (milk <= 0 || output <= 0 || cost < 0 || !variantId) return res.status(400).json({ error: 'Milk input, output quantity, cost and output variant are required' });
-
     const result = await transaction(async client => {
       if (idempotencyKey) {
         const existing = await client.query(`SELECT * FROM production_batches WHERE idempotency_key=$1 FOR UPDATE`, [idempotencyKey]);
@@ -37,11 +36,7 @@ router.post('/batches', requireRole('owner', 'manager', 'worker'), async (req, r
       if (!variant.rows[0]) throw Object.assign(new Error('Output variant not found'), { status: 404 });
       const number = await nextNumber(client);
       const status = String(req.body?.status ?? 'curing') === 'completed' ? 'completed' : 'curing';
-      const b = await client.query(
-        `INSERT INTO production_batches(batch_number,product_id,milk_type,milk_input_liters,total_cost,output_quantity,cost_per_unit,expiry_date,status,notes,created_by,idempotency_key)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
-        [number, variant.rows[0].product_id, req.body?.milkType ?? null, milk, cost, output, cost / output, req.body?.expiryDate ?? null, status, req.body?.notes ?? null, req.user!.id, idempotencyKey]
-      );
+      const b = await client.query(`INSERT INTO production_batches(batch_number,product_id,milk_type,milk_input_liters,total_cost,output_quantity,cost_per_unit,expiry_date,status,notes,created_by,idempotency_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`, [number, variant.rows[0].product_id, req.body?.milkType ?? null, milk, cost, output, cost / output, req.body?.expiryDate ?? null, status, req.body?.notes ?? null, req.user!.id, idempotencyKey]);
       if (status === 'completed') {
         await client.query(`INSERT INTO inventory_balances(variant_id,quantity,reserved_quantity) VALUES($1,$2,0) ON CONFLICT(variant_id) DO UPDATE SET quantity=inventory_balances.quantity+$2,updated_at=NOW()`, [variantId, output]);
         await client.query(`INSERT INTO inventory_movements(variant_id,movement_type,quantity,reference_type,reference_id,idempotency_key,created_by) VALUES($1,'production',$2,'production',$3,$4,$5) ON CONFLICT(idempotency_key) DO NOTHING`, [variantId, output, b.rows[0].id, `production:${b.rows[0].id}:${variantId}`, req.user!.id]);
@@ -100,11 +95,18 @@ router.post('/livestock/events', requireRole('owner', 'manager', 'worker'), asyn
   } catch (e) { next(e); }
 });
 
+router.get('/feed', async (_req, res, next) => {
+  try {
+    const r = await query(`SELECT fr.*,s.name AS supplier_name FROM feed_records fr LEFT JOIN suppliers s ON s.id=fr.supplier_id ORDER BY fr.record_date DESC,fr.created_at DESC LIMIT 200`);
+    res.json({ items: r.rows });
+  } catch (e) { next(e); }
+});
+
 router.post('/feed', requireRole('owner', 'manager', 'worker'), async (req, res, next) => {
   try {
     const q = Number(req.body?.quantity), cost = Number(req.body?.cost ?? 0), animal = String(req.body?.animalType ?? 'mixed');
     const idempotencyKey = String(req.body?.idempotencyKey ?? req.header('Idempotency-Key') ?? '').trim() || null;
-    if (!['cow', 'goat', 'mixed'].includes(animal) || !Number.isFinite(q) || q <= 0 || !Number.isFinite(cost) || cost < 0) return res.status(400).json({ error: 'Invalid feed record' });
+    if (!['cow', 'goat', 'sheep', 'mixed'].includes(animal) || !Number.isFinite(q) || q <= 0 || !Number.isFinite(cost) || cost < 0) return res.status(400).json({ error: 'Invalid feed record' });
     const result = await transaction(async client => {
       if (idempotencyKey) {
         const existing = await client.query(`SELECT * FROM feed_records WHERE idempotency_key=$1 FOR UPDATE`, [idempotencyKey]);
