@@ -55,6 +55,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     needs: quality
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: azrnou
+          POSTGRES_PASSWORD: azrnou
+          POSTGRES_DB: azrnou_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U azrnou -d azrnou_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://azrnou:azrnou@localhost:5432/azrnou_test
+      JWT_SECRET: ci-e2e-jwt-secret-not-for-production
+      API_PORT: "4000"
+      VITE_API_URL: http://127.0.0.1:4000/api
+      PLAYWRIGHT_BASE_URL: http://127.0.0.1:4173
+      CI: "true"
+      E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
+      E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -65,10 +88,20 @@ jobs:
           npm install --no-audit --no-fund
           npm install -D @playwright/test@1.49.0 --no-audit --no-fund
           npx playwright install chromium --with-deps
+      - name: Migrate + optional E2E seed
+        run: |
+          npm run db:migrate
+          npx tsx server/seed-e2e.ts
+      - name: Start API
+        run: |
+          npx tsx server/index.ts &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:4000/api/health >/dev/null 2>&1 && break
+            curl -sf http://127.0.0.1:4000/api >/dev/null 2>&1 && break
+            sleep 1
+          done
       - name: Production build
         run: npm run build
-      - name: Browser E2E (offline queue + PWA)
-        env:
-          PLAYWRIGHT_BASE_URL: http://127.0.0.1:4173
-          CI: true
-        run: npx playwright test e2e/auth-offline.spec.ts e2e/pwa-live.spec.ts --config=playwright.config.ts
+      - name: Browser E2E offline + PWA + auth (if secrets set)
+        run: |
+          npx playwright test e2e/auth-offline.spec.ts e2e/pwa-live.spec.ts e2e/auth-business-offline.spec.ts --config=playwright.config.ts
