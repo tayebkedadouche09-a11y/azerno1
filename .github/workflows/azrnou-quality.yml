@@ -33,12 +33,12 @@ jobs:
           node-version: 22
       - name: Install
         run: npm install --no-audit --no-fund
-      - name: Migrations 001-025
+      - name: Migrations 001-026
         run: npm run db:migrate
       - name: TypeScript
         run: npm run lint
       - name: Integration tests
-        run: npx tsx --test server/__tests__/integration.test.ts server/__tests__/idempotency.test.ts server/__tests__/api_idempotency.test.ts
+        run: npx tsx --test server/__tests__/integration.test.ts server/__tests__/idempotency.test.ts server/__tests__/api_idempotency.test.ts server/__tests__/offline_queue_contract.test.ts
         continue-on-error: false
       - name: RLS proof SQL
         run: |
