@@ -50,3 +50,25 @@ jobs:
         continue-on-error: false
       - name: Production build
         run: npm run build
+
+  browser-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: quality
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install
+        run: npm install --no-audit --no-fund
+      - name: Install Playwright Chromium
+        run: npx --yes playwright@1.49.0 install chromium --with-deps
+      - name: Production build
+        run: npm run build
+      - name: Browser E2E (offline queue + PWA assets)
+        env:
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:4173
+          CI: true
+        run: |
+          npx --yes playwright@1.49.0 test e2e/auth-offline.spec.ts e2e/pwa-live.spec.ts --config=playwright.config.ts
