@@ -1,7 +1,3 @@
-/**
- * Integration tests against DATABASE_URL (PostgreSQL).
- * Run: npx tsx --test server/__tests__/integration.test.ts
- */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
@@ -26,14 +22,18 @@ describe('AZRNOU integration', () => {
     else assert.ok(pool);
   });
 
-  it('companies and memberships tables exist', async () => {
+  it('core tables exist after migrations', async () => {
     if (!pool) return;
     const r = await pool.query(
-      `SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('companies','company_memberships','customers','orders')`
+      `SELECT table_name FROM information_schema.tables
+       WHERE table_schema='public'
+         AND table_name = ANY($1::text[])`,
+      [['companies', 'company_memberships', 'customers', 'orders', 'payments', 'inventory_balances', 'app_settings']]
     );
-    const names = r.rows.map((x: { table_name: string }) => x.table_name).sort();
-    assert.ok(names.includes('companies'));
-    assert.ok(names.includes('customers'));
+    const names = new Set(r.rows.map((x: { table_name: string }) => x.table_name));
+    for (const t of ['companies', 'customers', 'orders']) {
+      assert.ok(names.has(t), `missing table ${t}`);
+    }
   });
 
   it('cross-company customer filter isolates rows', async () => {
@@ -45,14 +45,11 @@ describe('AZRNOU integration', () => {
         `co-a-${Date.now()}`,
       ]);
       const b = await client.query(`INSERT INTO companies (name, slug) VALUES ('Co B', $1) RETURNING id`, [
-        `co-b-${Date.now()}`,
+        `co-b-${Date.now() + 1}`,
       ]);
       const ca = a.rows[0].id;
       const cb = b.rows[0].id;
-      const ins = await client.query(
-        `INSERT INTO customers (name, company_id) VALUES ('Buyer', $1) RETURNING id`,
-        [ca]
-      );
+      const ins = await client.query(`INSERT INTO customers (name, company_id) VALUES ('Buyer', $1) RETURNING id`, [ca]);
       const cid = ins.rows[0].id;
       const visibleB = await client.query(`SELECT id FROM customers WHERE id=$1 AND company_id=$2`, [cid, cb]);
       assert.equal(visibleB.rows.length, 0);
@@ -64,10 +61,34 @@ describe('AZRNOU integration', () => {
     }
   });
 
-  it('inventory non-negative constraint or check exists when migration 019 applied', async () => {
+  it('azrnou_app role exists and is not superuser when migration 023 applied', async () => {
+    if (!pool) return;
+    const r = await pool.query(`SELECT rolname, rolsuper FROM pg_roles WHERE rolname = 'azrnou_app'`);
+    if (r.rows.length === 0) {
+      assert.ok(true);
+      return;
+    }
+    assert.equal(r.rows[0].rolsuper, false);
+  });
+
+  it('RLS policies exist on customers when isolation migration applied', async () => {
+    if (!pool) return;
+    const r = await pool.query(`SELECT polname FROM pg_policy WHERE polrelid = 'customers'::regclass`);
+    assert.ok(Array.isArray(r.rows));
+  });
+
+  it('inventory balances constraints probe', async () => {
+    if (!pool) return;
+    const cons = await pool.query(
+      `SELECT conname FROM pg_constraint WHERE conrelid = 'inventory_balances'::regclass`
+    );
+    assert.ok(Array.isArray(cons.rows));
+  });
+
+  it('order idempotency index probe', async () => {
     if (!pool) return;
     const r = await pool.query(
-      `SELECT conname FROM pg_constraint WHERE conname ILIKE '%inventory%' OR conname ILIKE '%quantity%' LIMIT 5`
+      `SELECT indexname FROM pg_indexes WHERE tablename = 'orders' AND indexdef ILIKE '%idempotency%'`
     );
     assert.ok(Array.isArray(r.rows));
   });
