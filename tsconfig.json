@@ -23,5 +23,13 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "exclude": ["node_modules", "android", "ios", "dist", "server"]
+  "exclude": [
+    "android",
+    "dist",
+    "e2e",
+    "ios",
+    "node_modules",
+    "playwright.config.ts",
+    "server"
+  ]
 }
