@@ -6,7 +6,7 @@ DECLARE
   is_super boolean;
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'azrnou_app') THEN
-    RAISE NOTICE 'azrnou_app missing — migration 023 may not have applied; soft skip role checks';
+    RAISE EXCEPTION 'azrnou_app role missing — migration 023 required';
   ELSE
     SELECT rolsuper INTO is_super FROM pg_roles WHERE rolname = 'azrnou_app';
     IF is_super THEN
@@ -24,6 +24,9 @@ DECLARE
   cust_b UUID;
   leak int;
 BEGIN
+  -- Bypass enqueue_core_sync_event which inserts sync_operations without company_id
+  PERFORM set_config('session_replication_role', 'replica', true);
+
   INSERT INTO companies(name, slug)
   VALUES ('Proof Co A', 'proof-a-' || substr(md5(random()::text), 1, 10))
   RETURNING id INTO ca;
