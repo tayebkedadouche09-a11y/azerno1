@@ -44,6 +44,7 @@ export const api={
  createInvoiceFromOrder:(orderId:string)=>request(`/operations/invoices/from-order/${encodeURIComponent(orderId)}`,{method:'POST'}),
  createProductionBatch:(payload:unknown)=>request('/production/batches',{method:'POST',body:JSON.stringify(payload)}),
  completeProductionBatch:(batchId:string,outputVariantId?:string,idempotencyKey?:string)=>request(`/production/batches/${encodeURIComponent(batchId)}/complete`,{method:'PATCH',headers:idempotencyKey?{'Idempotency-Key':idempotencyKey}:undefined,body:JSON.stringify({outputVariantId,idempotencyKey})}),
+ syncProductionCompletion:(batchId:string,outputVariantId:string,idempotencyKey:string)=>request('/production-sync/complete',{method:'POST',body:JSON.stringify({batchId,outputVariantId,idempotencyKey})}),
  createLivestockEvent:(payload:unknown)=>request('/production/livestock/events',{method:'POST',body:JSON.stringify(payload)}),
  createFeed:(payload:unknown)=>request('/production/feed',{method:'POST',body:JSON.stringify(payload)}),
  syncPush:async(deviceId:string,operations:unknown[])=>{
