@@ -1,17 +1,24 @@
-export type ApiUser = { id: string; name: string; role: 'owner' | 'manager' | 'worker' };
-export type ApiList<T> = { items: T[] };
-export type SyncPushResult = { accepted: string[]; duplicates: string[]; rejected: Array<{ operationId: string; reason: string }> };
-const API_BASE = (import.meta.env.VITE_API_URL ?? '/api').replace(/\/$/, '');
-const TOKEN_KEY = 'azrnou_access_token';
-const token = () => localStorage.getItem(TOKEN_KEY);
-export function setAccessToken(value: string | null){if(value)localStorage.setItem(TOKEN_KEY,value);else localStorage.removeItem(TOKEN_KEY);}
+export type ApiUser = { id:string; name:string; role:'owner'|'manager'|'worker'; companyId:string; companyName:string };
+export type ApiCompany = { id:string; name:string; slug:string; active:boolean; role:'owner'|'manager'|'worker' };
+export type ApiList<T> = { items:T[] };
+export type SyncPushResult = { accepted:string[]; duplicates:string[]; rejected:Array<{operationId:string;reason:string}> };
+const API_BASE=(import.meta.env.VITE_API_URL??'/api').replace(/\/$/,'');
+const TOKEN_KEY='azrnou_access_token';
+const token=()=>localStorage.getItem(TOKEN_KEY);
+export function setAccessToken(value:string|null){if(value)localStorage.setItem(TOKEN_KEY,value);else localStorage.removeItem(TOKEN_KEY);}
 export function getAccessToken(){return token();}
 async function request<T>(path:string,init:RequestInit={}):Promise<T>{const headers=new Headers(init.headers);if(init.body)headers.set('Content-Type','application/json');const accessToken=token();if(accessToken)headers.set('Authorization',`Bearer ${accessToken}`);const response=await fetch(`${API_BASE}${path}`,{...init,headers});const contentType=response.headers.get('content-type')??'';const body=contentType.includes('application/json')?await response.json():null;if(!response.ok)throw new Error(body?.error??`API request failed (${response.status})`);return body as T;}
 export const api={
  health:()=>request<{ok:boolean;service:string;database:string;timestamp:string}>('/health'),
- login:async(identifier:string,password:string)=>{const result=await request<{token:string;user:ApiUser}>('/auth/login',{method:'POST',body:JSON.stringify({email:identifier,password})});setAccessToken(result.token);return result.user;},
+ login:async(identifier:string,password:string,companyId?:string)=>{const result=await request<{token:string;user:ApiUser;companies:ApiCompany[]}>('/auth/login',{method:'POST',body:JSON.stringify({email:identifier,password,companyId})});setAccessToken(result.token);return result.user;},
  me:()=>request<{user:ApiUser}>('/auth/me'),
- logout:async()=>{try{await request('/auth/logout',{method:'POST'});}finally{setAccessToken(null);}},
+ companies:()=>request<ApiList<ApiCompany>>('/auth/companies'),
+ selectCompany:async(companyId:string)=>{const result=await request<{token:string;company:ApiCompany}>(`/auth/companies/${encodeURIComponent(companyId)}/select`,{method:'POST'});setAccessToken(result.token);return result.company;},
+ companyMembers:(companyId:string)=>request<ApiList<Record<string,unknown>>>(`/auth/companies/${encodeURIComponent(companyId)}/members`),
+ addCompanyMember:(companyId:string,payload:unknown)=>request(`/auth/companies/${encodeURIComponent(companyId)}/members`,{method:'POST',body:JSON.stringify(payload)}),
+ removeCompanyMember:(companyId:string,userId:string)=>request(`/auth/companies/${encodeURIComponent(companyId)}/members/${encodeURIComponent(userId)}`,{method:'DELETE'}),
+ createCompany:(payload:unknown)=>request('/auth/companies',{method:'POST',body:JSON.stringify(payload)}),
+ logout:async()=>{try{await request('/auth/logout');}finally{setAccessToken(null);}},
  customers:()=>request<ApiList<Record<string,unknown>>>('/business/customers'),
  products:()=>request<ApiList<Record<string,unknown>>>('/business/products'),
  productCategories:()=>request<ApiList<Record<string,unknown>>>('/business-core/categories'),
@@ -27,6 +34,11 @@ export const api={
  livestock:()=>request<ApiList<Record<string,unknown>>>('/production/livestock'),
  feedRecords:()=>request<ApiList<Record<string,unknown>>>('/production/feed'),
  reportSummary:(start?:string,end?:string)=>request<Record<string,unknown>>(`/reports/summary?start=${encodeURIComponent(start??'1970-01-01')}&end=${encodeURIComponent(end??'2999-12-31')}`),
+ reportSalesByProduct:(start?:string,end?:string)=>request<ApiList<Record<string,unknown>>>(`/reports/sales-by-product?start=${encodeURIComponent(start??'1970-01-01')}&end=${encodeURIComponent(end??'2999-12-31')}`),
+ reportCustomers:()=>request<ApiList<Record<string,unknown>>>('/reports/customers'),
+ reportMilkYield:(start?:string,end?:string)=>request<Record<string,unknown>>(`/reports/milk-yield?start=${encodeURIComponent(start??'1970-01-01')}&end=${encodeURIComponent(end??'2999-12-31')}`),
+ reportStockValuation:()=>request<ApiList<Record<string,unknown>>>('/reports/stock-valuation'),
+ reportLowStock:()=>request<ApiList<Record<string,unknown>>>('/reports/low-stock'),
  lowStock:()=>request<ApiList<Record<string,unknown>>>('/reports/low-stock'),
  createCustomer:(payload:unknown)=>request('/business/customers',{method:'POST',body:JSON.stringify(payload)}),
  createProduct:(payload:unknown)=>request('/business/products',{method:'POST',body:JSON.stringify(payload)}),
@@ -44,34 +56,10 @@ export const api={
  createInvoiceFromOrder:(orderId:string)=>request(`/operations/invoices/from-order/${encodeURIComponent(orderId)}`,{method:'POST'}),
  createProductionBatch:(payload:unknown)=>request('/production/batches',{method:'POST',body:JSON.stringify(payload)}),
  completeProductionBatch:(batchId:string,outputVariantId?:string,idempotencyKey?:string)=>request(`/production/batches/${encodeURIComponent(batchId)}/complete`,{method:'PATCH',headers:idempotencyKey?{'Idempotency-Key':idempotencyKey}:undefined,body:JSON.stringify({outputVariantId,idempotencyKey})}),
+ syncProductionCompletion:(batchId:string,outputVariantId:string,idempotencyKey:string)=>request('/production-sync/complete',{method:'POST',body:JSON.stringify({batchId,outputVariantId,idempotencyKey})}),
  createLivestockEvent:(payload:unknown)=>request('/production/livestock/events',{method:'POST',body:JSON.stringify(payload)}),
  createFeed:(payload:unknown)=>request('/production/feed',{method:'POST',body:JSON.stringify(payload)}),
- syncPush:async(deviceId:string,operations:unknown[])=>{
-   const list = Array.isArray(operations) ? operations as Array<Record<string,any>> : [];
-   const accepted:string[]=[]; const duplicates:string[]=[]; const rejected:Array<{operationId:string;reason:string}>=[];
-   const remoteOperations = [] as Array<Record<string,any>>;
-   for (const operation of list) {
-     if (operation.entityType === 'purchase' && operation.operationType === 'create') {
-       const operationId = String(operation.operationId ?? '');
-       try {
-         const payload = { ...(operation.payload as Record<string,any> ?? {}), idempotencyKey: operationId };
-         await request('/finance/purchases',{method:'POST',body:JSON.stringify(payload)});
-         accepted.push(operationId);
-       } catch (error) {
-         const message = error instanceof Error ? error.message : String(error);
-         if (/idempotency|already exists|duplicate|unique/i.test(message)) duplicates.push(operationId);
-         else rejected.push({ operationId, reason: message });
-       }
-     } else {
-       remoteOperations.push(operation);
-     }
-   }
-   if (remoteOperations.length) {
-     const result = await request<SyncPushResult>('/sync/push',{method:'POST',body:JSON.stringify({deviceId,operations:remoteOperations})});
-     accepted.push(...result.accepted); duplicates.push(...result.duplicates); rejected.push(...result.rejected);
-   }
-   return { accepted, duplicates, rejected };
- },
+ syncPush:async(deviceId:string,operations:unknown[])=>{const list=Array.isArray(operations)?operations as Array<Record<string,any>>:[];const accepted:string[]=[];const duplicates:string[]=[];const rejected:Array<{operationId:string;reason:string}>=[];const remoteOperations:Array<Record<string,any>>=[];for(const operation of list){if(operation.entityType==='purchase'&&operation.operationType==='create'){const operationId=String(operation.operationId??'');try{const payload={...(operation.payload as Record<string,any>??{}),idempotencyKey:operationId};await request('/finance/purchases',{method:'POST',body:JSON.stringify(payload)});accepted.push(operationId);}catch(error){const message=error instanceof Error?error.message:String(error);if(/idempotency|already exists|duplicate|unique/i.test(message))duplicates.push(operationId);else rejected.push({operationId,reason:message});}}else remoteOperations.push(operation);}if(remoteOperations.length){const result=await request<SyncPushResult>('/sync/push',{method:'POST',body:JSON.stringify({deviceId,operations:remoteOperations})});accepted.push(...result.accepted);duplicates.push(...result.duplicates);rejected.push(...result.rejected);}return{accepted,duplicates,rejected};},
  syncPull:(deviceId:string,since:string)=>request<{items:Record<string,unknown>[];nextSince:string}>(`/sync/pull?deviceId=${encodeURIComponent(deviceId)}&since=${encodeURIComponent(since)}`),
  syncStatus:(deviceId:string)=>request<Record<string,unknown>>(`/sync/status?deviceId=${encodeURIComponent(deviceId)}`),
 };

@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
 
 const { Pool } = pg;
@@ -17,14 +18,36 @@ export const pool = new Pool({
   ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
 });
 
+const companyContext = new AsyncLocalStorage<string>();
+
+export function getCompanyContext() {
+  return companyContext.getStore() ?? null;
+}
+
+export function withCompanyContext<T>(companyId: string, work: () => T): T {
+  return companyContext.run(companyId, work);
+}
+
+async function prepareClient(client: pg.PoolClient) {
+  const companyId = getCompanyContext();
+  await client.query('SELECT set_config($1, $2, false)', ['app.company_id', companyId ?? '']);
+}
+
 export async function query<T = unknown>(text: string, values: unknown[] = []) {
-  return pool.query<T>(text, values);
+  const client = await pool.connect();
+  try {
+    await prepareClient(client);
+    return await client.query<T>(text, values);
+  } finally {
+    client.release();
+  }
 }
 
 export async function transaction<T>(work: (client: pg.PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await prepareClient(client);
     const result = await work(client);
     await client.query('COMMIT');
     return result;
