@@ -7,22 +7,225 @@ router.use(requireAuth);
 const allowedEntities = new Set(['customer','supplier','product','variant','order','payment','expense','purchase','production','livestock_event','feed','return','waste']);
 
 type SyncOperation = { operationId:string; entityType:string; entityId?:string|null; operationType?:'create'|'update'|'delete'; payload?:Record<string,any> };
-async function nextNumber(client: import('pg').PoolClient,key:string,prefix:string){const row=await client.query<{value:{counter?:number}}>('SELECT value FROM app_settings WHERE key=$1 FOR UPDATE',[key]);const counter=Number(row.rows[0]?.value?.counter??0)+1;await client.query(`INSERT INTO app_settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()`,[key,JSON.stringify({counter})]);return `${prefix}${String(counter).padStart(6,'0')}`;}
 
-async function applyCreate(client:import('pg').PoolClient,op:SyncOperation,userId:string){
- const p=op.payload??{};const id=String(p.id??op.entityId??'').trim();if(!id)throw new Error('Create operation requires a stable id');
- if(op.entityType==='customer'){if(!String(p.name??'').trim())throw new Error('Customer name is required');await client.query(`INSERT INTO customers(id,name,phone,address,notes,customer_type,credit_limit,payment_terms_days,custom_prices) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO NOTHING`,[id,String(p.name).trim(),p.phone??null,p.address??null,p.notes??null,p.type??'wholesale',Number(p.creditLimit??0),Number(p.paymentTermsDays??0),p.customPrices??{}]);return;}
- if(op.entityType==='product'){const variant=p.variant??p,productId=id,variantId=String(variant.id??crypto.randomUUID());if(!String(p.name??'').trim()||!variant.name||!variant.unit)throw new Error('Product name and variant name/unit are required');await client.query(`INSERT INTO products(id,name,name_ar,category_id) VALUES($1,$2,$3,$4) ON CONFLICT(id) DO NOTHING`,[productId,String(p.name).trim(),p.nameAr??null,p.categoryId??null]);await client.query(`INSERT INTO product_variants(id,product_id,name,sku,barcode,unit,weight_grams,package_type,retail_price,wholesale_price,production_cost,min_stock,min_order_qty,expiry_days,image_url) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(id) DO NOTHING`,[variantId,productId,variant.name,variant.sku??null,variant.barcode??null,variant.unit,variant.weightGrams??null,variant.packageType??null,Number(variant.retailPrice??0),Number(variant.wholesalePrice??0),Number(variant.productionCost??variant.cost??0),Number(variant.minStock??0),Number(variant.minOrderQty??1),variant.expiryDays??null,variant.imageUrl??variant.image??null]);await client.query(`INSERT INTO inventory_balances(variant_id) VALUES($1) ON CONFLICT DO NOTHING`,[variantId]);return;}
- if(op.entityType==='order'){const items=Array.isArray(p.items)?p.items:[];if(!items.length)throw new Error('Order requires at least one item');if((await client.query('SELECT id FROM orders WHERE id=$1',[id])).rows[0])return;let subtotal=0,costTotal=0;const normalized:any[]=[];const seenVariants=new Set<string>();for(const item of items){const quantity=Number(item.quantity);const variantId=String(item.variantId??'');if(!variantId||!Number.isFinite(quantity)||quantity<=0)throw new Error('Invalid order quantity');if(seenVariants.has(variantId))throw new Error(`Duplicate order line for variant ${variantId}`);seenVariants.add(variantId);const v=await client.query(`SELECT id,retail_price,production_cost FROM product_variants WHERE id=$1 AND active=TRUE FOR SHARE`,[variantId]);if(!v.rows[0])throw new Error(`Product variant not found: ${variantId}`);const b=await client.query(`SELECT quantity,reserved_quantity FROM inventory_balances WHERE variant_id=$1 FOR UPDATE`,[variantId]);if(Number(b.rows[0]?.quantity??0)-Number(b.rows[0]?.reserved_quantity??0)<quantity)throw new Error(`Insufficient available stock for variant ${variantId}`);const unitPrice=Number(item.unitPrice??v.rows[0].retail_price),unitCost=Number(v.rows[0].production_cost),discount=Number(item.discount??item.discountPercent??0);if(unitPrice<0||discount<0||discount>quantity*unitPrice)throw new Error('Invalid price or discount');subtotal+=quantity*unitPrice-discount;costTotal+=quantity*unitCost;normalized.push({variantId,quantity,unitPrice,unitCost,discount});}const number=await nextNumber(client,'order_number','BC-');await client.query(`INSERT INTO orders(id,number,customer_id,status,payment_status,delivery_date,subtotal,total,cost_total,created_by) VALUES($1,$2,$3,'confirmed','unpaid',$4,$5,$6,$7,$8)`,[id,number,p.customerId??null,p.deliveryDate??null,subtotal,subtotal,costTotal,userId]);for(const item of normalized){await client.query(`INSERT INTO order_items(order_id,variant_id,quantity,unit_price,unit_cost,discount) VALUES($1,$2,$3,$4,$5,$6)`,[id,item.variantId,item.quantity,item.unitPrice,item.unitCost,item.discount]);await client.query(`UPDATE inventory_balances SET reserved_quantity=reserved_quantity+$2,updated_at=NOW() WHERE variant_id=$1`,[item.variantId,item.quantity]);await client.query(`INSERT INTO inventory_movements(variant_id,movement_type,quantity,reference_type,reference_id,idempotency_key,created_by) VALUES($1,'order_reservation',$2,'order',$3,$4,$5) ON CONFLICT(idempotency_key) DO NOTHING`,[item.variantId,item.quantity,id,`order:${id}:${item.variantId}`,userId]);}await client.query(`INSERT INTO audit_logs(user_id,action,entity_type,entity_id,after_data) VALUES($1,'create','order',$2,$3)`,[userId,id,JSON.stringify({id,total:subtotal})]);return;}
- if(op.entityType==='payment'){const orderId=String(p.orderId??''),amount=Number(p.amount);if(!orderId||!Number.isFinite(amount)||amount<=0)throw new Error('Order and positive payment amount are required');if((await client.query('SELECT id FROM payments WHERE idempotency_key=$1',[op.operationId])).rows[0])return;const order=await client.query(`SELECT id,customer_id,total,paid_total,status FROM orders WHERE id=$1 FOR UPDATE`,[orderId]);if(!order.rows[0])throw new Error('Order not found');if(order.rows[0].status==='cancelled')throw new Error('Cannot pay a cancelled order');if(amount>Number(order.rows[0].total)-Number(order.rows[0].paid_total))throw new Error('Payment exceeds outstanding balance');await client.query(`INSERT INTO payments(id,customer_id,order_id,amount,method,note,idempotency_key,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,[id,order.rows[0].customer_id,orderId,amount,String(p.method??'cash'),p.note??null,op.operationId,userId]);const paid=Number(order.rows[0].paid_total)+amount,status=paid>=Number(order.rows[0].total)?'paid':'partially_paid';await client.query(`UPDATE orders SET paid_total=$2,payment_status=$3,status=CASE WHEN status='delivered' AND $2>=total THEN 'paid' ELSE status END,updated_at=NOW() WHERE id=$1`,[orderId,paid,status]);return;}
- throw new Error(`Create sync for ${op.entityType} is not implemented`);
+async function nextNumber(client: import('pg').PoolClient, key: string, prefix: string) {
+  const row = await client.query<{ value: { counter?: number } }>('SELECT value FROM app_settings WHERE key=$1 FOR UPDATE', [key]);
+  const counter = Number(row.rows[0]?.value?.counter ?? 0) + 1;
+  await client.query(`INSERT INTO app_settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()`, [key, JSON.stringify({ counter })]);
+  return `${prefix}${String(counter).padStart(6, '0')}`;
 }
 
-async function checkConflict(client:import('pg').PoolClient,table:string,id:string,payload:Record<string,any>){const base=payload.baseUpdatedAt;if(!base)return;const row=await client.query(`SELECT updated_at FROM ${table} WHERE id=$1`,[id]);if(!row.rows[0])throw new Error('Record not found');if(new Date(String(row.rows[0].updated_at)).getTime()>new Date(String(base)).getTime())throw new Error('Conflict: server record changed after the offline edit');}
-async function applyUpdate(client:import('pg').PoolClient,op:SyncOperation,userId:string){const p=op.payload??{},id=String(op.entityId??p.id??'');if(!id)throw new Error('Update operation requires an entity id');if(op.entityType==='customer'){await checkConflict(client,'customers',id,p);const fields:any[]=[];const vals:any[]=[];const add=(sql:string,v:any)=>{fields.push(sql);vals.push(v)};if(p.name!=null)add('name=$'+(vals.length+1),String(p.name).trim());if(p.phone!==undefined)add('phone=$'+(vals.length+1),p.phone);if(p.address!==undefined)add('address=$'+(vals.length+1),p.address);if(p.notes!==undefined)add('notes=$'+(vals.length+1),p.notes);if(!fields.length)return;vals.push(id);await client.query(`UPDATE customers SET ${fields.join(',')},updated_at=NOW() WHERE id=$${vals.length}`,vals);return;}if(op.entityType==='variant'){await checkConflict(client,'product_variants',id,p);const allowed=['name','sku','barcode','retail_price','wholesale_price','production_cost','min_stock','min_order_qty','expiry_days','image_url'];const map:any={name:p.name,sku:p.sku,barcode:p.barcode,retail_price:p.retailPrice,wholesale_price:p.wholesalePrice,production_cost:p.productionCost??p.cost,min_stock:p.minStock,min_order_qty:p.minOrderQty,expiry_days:p.expiryDays,image_url:p.imageUrl??p.image};const set:string[]=[];const vals:any[]=[];for(const key of allowed){if(map[key]!==undefined){set.push(`${key}=$${vals.length+1}`);vals.push(map[key])}}if(!set.length)return;vals.push(id);await client.query(`UPDATE product_variants SET ${set.join(',')},updated_at=NOW() WHERE id=$${vals.length}`,vals);return;}throw new Error(`Update sync for ${op.entityType} is not implemented`);}
-async function applyDelete(client:import('pg').PoolClient,op:SyncOperation){const p=op.payload??{},id=String(op.entityId??p.id??'');if(!id)throw new Error('Delete operation requires an entity id');if(op.entityType==='customer'){await client.query(`UPDATE customers SET active=FALSE,updated_at=NOW() WHERE id=$1`,[id]);return;}if(op.entityType==='product'){await client.query(`UPDATE products SET active=FALSE,updated_at=NOW() WHERE id=$1`,[id]);return;}if(op.entityType==='variant'){await client.query(`UPDATE product_variants SET active=FALSE,updated_at=NOW() WHERE id=$1`,[id]);return;}throw new Error('Financial or inventory records cannot be deleted through offline sync');}
+async function applyCreate(client: import('pg').PoolClient, op: SyncOperation, userId: string) {
+  const p = op.payload ?? {};
+  const id = String(p.id ?? op.entityId ?? '').trim();
+  if (!id) throw new Error('Create operation requires a stable id');
 
-router.post('/push',async(req,res,next)=>{try{const deviceId=String(req.body?.deviceId??'').trim(),operations=Array.isArray(req.body?.operations)?req.body.operations as SyncOperation[]:[];if(!deviceId||!operations.length)return res.status(400).json({error:'deviceId and operations are required'});const result=await transaction(async client=>{const accepted:string[]=[],duplicates:string[]=[],rejected:Array<{operationId:string;reason:string}>=[];for(const op of operations){const id=String(op?.operationId??'').trim(),entity=String(op?.entityType??'').trim(),operationType=op.operationType??'create';if(!id||!allowedEntities.has(entity)||!['create','update','delete'].includes(operationType)){rejected.push({operationId:id,reason:'Unsupported or invalid operation'});continue;}await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[id]);const existing=await client.query<{status:string}>('SELECT status FROM sync_operations WHERE operation_id=$1 FOR UPDATE',[id]);if(existing.rows[0]?.status==='applied'){duplicates.push(id);continue;}if(existing.rows[0]?.status==='rejected'){await client.query('DELETE FROM sync_operations WHERE operation_id=$1',[id]);}try{if(operationType==='create')await applyCreate(client,op,req.user!.id);else if(operationType==='update')await applyUpdate(client,op,req.user!.id);else await applyDelete(client,op);await client.query(`INSERT INTO sync_operations(device_id,operation_id,entity_type,entity_id,operation_type,payload,status,applied_at) VALUES($1,$2,$3,$4,$5,$6,'applied',NOW())`,[deviceId,id,entity,op.entityId??op.payload?.id??null,operationType,JSON.stringify(op.payload??{})]);accepted.push(id);}catch(error){const reason=error instanceof Error?error.message:String(error);rejected.push({operationId:id,reason});await client.query(`INSERT INTO sync_operations(device_id,operation_id,entity_type,entity_id,operation_type,payload,status) VALUES($1,$2,$3,$4,$5,$6,'rejected') ON CONFLICT(operation_id) DO UPDATE SET status='rejected',payload=EXCLUDED.payload,device_id=EXCLUDED.device_id`,[deviceId,id,entity,op.entityId??op.payload?.id??null,operationType,JSON.stringify(op.payload??{})]);}}return{accepted,duplicates,rejected};});res.json(result);}catch(e){next(e);}});
-router.get('/pull',async(req,res,next)=>{try{const rawSince=String(req.query.since??'1970-01-01T00:00:00.000Z'),deviceId=String(req.query.deviceId??'');let sinceTime=rawSince,sinceOperationId='';const separator=rawSince.indexOf('|');if(separator>0){sinceTime=rawSince.slice(0,separator);sinceOperationId=rawSince.slice(separator+1);}const r=await query<{created_at:string;operation_id:string}>(`SELECT operation_id,device_id,entity_type,entity_id,operation_type,payload,status,created_at,applied_at FROM sync_operations WHERE status='applied' AND ($2='' OR device_id<>$2) AND (created_at>$1 OR (created_at=$1 AND operation_id>$3)) ORDER BY created_at ASC, operation_id ASC LIMIT 500`,[sinceTime,deviceId,sinceOperationId]);const nextSince=r.rows.length?`${new Date(String(r.rows[r.rows.length-1].created_at)).toISOString()}|${String(r.rows[r.rows.length-1].operation_id)}`:rawSince;res.json({items:r.rows,nextSince});}catch(e){next(e);}});
-router.get('/status',async(req,res,next)=>{try{const deviceId=String(req.query.deviceId??'');const r=await query(`SELECT COUNT(*)::int AS total,COUNT(*) FILTER(WHERE status='pending')::int AS pending,COUNT(*) FILTER(WHERE status='rejected')::int AS rejected,MAX(created_at) AS last_operation FROM sync_operations WHERE ($1='' OR device_id=$1)`,[deviceId]);res.json(r.rows[0]);}catch(e){next(e);}});
+  if (op.entityType === 'customer') {
+    if (!String(p.name ?? '').trim()) throw new Error('Customer name is required');
+    await client.query(`INSERT INTO customers(id,name,phone,address,notes,customer_type,credit_limit,payment_terms_days,custom_prices) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO NOTHING`, [id, String(p.name).trim(), p.phone ?? null, p.address ?? null, p.notes ?? null, p.type ?? 'wholesale', Number(p.creditLimit ?? 0), Number(p.paymentTermsDays ?? 0), p.customPrices ?? {}]);
+    return;
+  }
+
+  if (op.entityType === 'product') {
+    const variant = p.variant ?? p;
+    const productId = id;
+    const variantId = String(variant.id ?? crypto.randomUUID());
+    if (!String(p.name ?? '').trim() || !variant.name || !variant.unit) throw new Error('Product name and variant name/unit are required');
+    await client.query(`INSERT INTO products(id,name,name_ar,category_id) VALUES($1,$2,$3,$4) ON CONFLICT(id) DO NOTHING`, [productId, String(p.name).trim(), p.nameAr ?? null, p.categoryId ?? null]);
+    await client.query(`INSERT INTO product_variants(id,product_id,name,sku,barcode,unit,weight_grams,package_type,retail_price,wholesale_price,production_cost,min_stock,min_order_qty,expiry_days,image_url) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(id) DO NOTHING`, [variantId, productId, variant.name, variant.sku ?? null, variant.barcode ?? null, variant.unit, variant.weightGrams ?? null, variant.packageType ?? null, Number(variant.retailPrice ?? 0), Number(variant.wholesalePrice ?? 0), Number(variant.productionCost ?? variant.cost ?? 0), Number(variant.minStock ?? 0), Number(variant.minOrderQty ?? 1), variant.expiryDays ?? null, variant.imageUrl ?? variant.image ?? null]);
+    await client.query(`INSERT INTO inventory_balances(variant_id) VALUES($1) ON CONFLICT DO NOTHING`, [variantId]);
+    return;
+  }
+
+  if (op.entityType === 'order') {
+    const items = Array.isArray(p.items) ? p.items : [];
+    if (!items.length) throw new Error('Order requires at least one item');
+    if ((await client.query('SELECT id FROM orders WHERE id=$1', [id])).rows[0]) return;
+    let subtotal = 0;
+    let costTotal = 0;
+    const normalized: any[] = [];
+    const seenVariants = new Set<string>();
+    for (const item of items) {
+      const quantity = Number(item.quantity);
+      const variantId = String(item.variantId ?? '');
+      if (!variantId || !Number.isFinite(quantity) || quantity <= 0) throw new Error('Invalid order quantity');
+      if (seenVariants.has(variantId)) throw new Error(`Duplicate order line for variant ${variantId}`);
+      seenVariants.add(variantId);
+      const v = await client.query(`SELECT id,retail_price,production_cost FROM product_variants WHERE id=$1 AND active=TRUE FOR SHARE`, [variantId]);
+      if (!v.rows[0]) throw new Error(`Product variant not found: ${variantId}`);
+      const b = await client.query(`SELECT quantity,reserved_quantity FROM inventory_balances WHERE variant_id=$1 FOR UPDATE`, [variantId]);
+      if (Number(b.rows[0]?.quantity ?? 0) - Number(b.rows[0]?.reserved_quantity ?? 0) < quantity) throw new Error(`Insufficient available stock for variant ${variantId}`);
+      const unitPrice = Number(item.unitPrice ?? v.rows[0].retail_price);
+      const unitCost = Number(v.rows[0].production_cost);
+      const discount = Number(item.discount ?? item.discountPercent ?? 0);
+      if (unitPrice < 0 || discount < 0 || discount > quantity * unitPrice) throw new Error('Invalid price or discount');
+      subtotal += quantity * unitPrice - discount;
+      costTotal += quantity * unitCost;
+      normalized.push({ variantId, quantity, unitPrice, unitCost, discount });
+    }
+    const number = await nextNumber(client, 'order_number', 'BC-');
+    await client.query(`INSERT INTO orders(id,number,customer_id,status,payment_status,delivery_date,subtotal,total,cost_total,created_by) VALUES($1,$2,$3,'confirmed','unpaid',$4,$5,$6,$7,$8)`, [id, number, p.customerId ?? null, p.deliveryDate ?? null, subtotal, subtotal, costTotal, userId]);
+    for (const item of normalized) {
+      await client.query(`INSERT INTO order_items(order_id,variant_id,quantity,unit_price,unit_cost,discount) VALUES($1,$2,$3,$4,$5,$6)`, [id, item.variantId, item.quantity, item.unitPrice, item.unitCost, item.discount]);
+      await client.query(`UPDATE inventory_balances SET reserved_quantity=reserved_quantity+$2,updated_at=NOW() WHERE variant_id=$1`, [item.variantId, item.quantity]);
+      await client.query(`INSERT INTO inventory_movements(variant_id,movement_type,quantity,reference_type,reference_id,idempotency_key,created_by) VALUES($1,'order_reservation',$2,'order',$3,$4,$5) ON CONFLICT(idempotency_key) DO NOTHING`, [item.variantId, item.quantity, id, `order:${id}:${item.variantId}`, userId]);
+    }
+    await client.query(`INSERT INTO audit_logs(user_id,action,entity_type,entity_id,after_data) VALUES($1,'create','order',$2,$3)`, [userId, id, JSON.stringify({ id, total: subtotal })]);
+    return;
+  }
+
+  if (op.entityType === 'payment') {
+    const orderId = String(p.orderId ?? ''), amount = Number(p.amount);
+    if (!orderId || !Number.isFinite(amount) || amount <= 0) throw new Error('Order and positive payment amount are required');
+    if ((await client.query('SELECT id FROM payments WHERE idempotency_key=$1', [op.operationId])).rows[0]) return;
+    const order = await client.query(`SELECT id,customer_id,total,paid_total,status FROM orders WHERE id=$1 FOR UPDATE`, [orderId]);
+    if (!order.rows[0]) throw new Error('Order not found');
+    if (order.rows[0].status === 'cancelled') throw new Error('Cannot pay a cancelled order');
+    if (amount > Number(order.rows[0].total) - Number(order.rows[0].paid_total)) throw new Error('Payment exceeds outstanding balance');
+    await client.query(`INSERT INTO payments(id,customer_id,order_id,amount,method,note,idempotency_key,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [id, order.rows[0].customer_id, orderId, amount, String(p.method ?? 'cash'), p.note ?? null, op.operationId, userId]);
+    const paid = Number(order.rows[0].paid_total) + amount;
+    const status = paid >= Number(order.rows[0].total) ? 'paid' : 'partially_paid';
+    await client.query(`UPDATE orders SET paid_total=$2,payment_status=$3,status=CASE WHEN status='delivered' AND $2>=total THEN 'paid' ELSE status END,updated_at=NOW() WHERE id=$1`, [orderId, paid, status]);
+    return;
+  }
+
+  if (op.entityType === 'production') {
+    const variantId = String(p.outputVariantId ?? '');
+    const milk = Number(p.milkInputLiters ?? 0);
+    const output = Number(p.outputQuantity ?? 0);
+    const cost = Number(p.totalCost ?? 0);
+    if (!variantId || milk <= 0 || output <= 0 || cost < 0) throw new Error('Invalid production payload');
+    const variant = await client.query(`SELECT product_id FROM product_variants WHERE id=$1 AND active=TRUE`, [variantId]);
+    if (!variant.rows[0]) throw new Error('Output variant not found');
+    if ((await client.query('SELECT id FROM production_batches WHERE id=$1', [id])).rows[0]) return;
+    const number = await nextNumber(client, 'batch_number', 'LOT-');
+    const status = String(p.status ?? 'curing') === 'completed' ? 'completed' : 'curing';
+    await client.query(`INSERT INTO production_batches(id,batch_number,product_id,milk_type,milk_input_liters,total_cost,output_quantity,cost_per_unit,expiry_date,status,notes,created_by,idempotency_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, [id, number, variant.rows[0].product_id, p.milkType ?? null, milk, cost, output, cost / output, p.expiryDate ?? null, status, p.notes ?? null, userId, op.operationId]);
+    if (status === 'completed') {
+      await client.query(`INSERT INTO inventory_balances(variant_id,quantity,reserved_quantity) VALUES($1,$2,0) ON CONFLICT(variant_id) DO UPDATE SET quantity=inventory_balances.quantity+$2,updated_at=NOW()`, [variantId, output]);
+      await client.query(`INSERT INTO inventory_movements(variant_id,movement_type,quantity,reference_type,reference_id,idempotency_key,created_by) VALUES($1,'production',$2,'production',$3,$4,$5) ON CONFLICT(idempotency_key) DO NOTHING`, [variantId, output, id, `production:${id}:${variantId}`, userId]);
+    }
+    await client.query(`INSERT INTO audit_logs(user_id,action,entity_type,entity_id,after_data) VALUES($1,'create','production_batch',$2,$3)`, [userId, id, JSON.stringify({ id, status, batchNumber: number })]);
+    return;
+  }
+
+  if (op.entityType === 'livestock_event') {
+    const eventType = String(p.eventType ?? ''), animalType = String(p.animalType ?? ''), quantity = Number(p.quantity);
+    if (!['purchase','sale','birth','death','loss','feed','veterinary','medicine','other'].includes(eventType)) throw new Error('Invalid livestock event type');
+    if (!['cow','goat','sheep','mixed'].includes(animalType) || !Number.isFinite(quantity) || quantity <= 0) throw new Error('Invalid livestock event');
+    await client.query(`INSERT INTO livestock_events(id,event_type,animal_type,quantity,amount,event_date,notes,created_by,idempotency_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO NOTHING`, [id, eventType, animalType, quantity, Number(p.amount ?? 0), p.date ?? new Date().toISOString().slice(0,10), p.notes ?? null, userId, op.operationId]);
+    await client.query(`INSERT INTO audit_logs(user_id,action,entity_type,entity_id,after_data) VALUES($1,'create','livestock_event',$2,$3) ON CONFLICT DO NOTHING`, [userId, id, JSON.stringify(p)]);
+    return;
+  }
+
+  if (op.entityType === 'feed') {
+    const animalType = String(p.animalType ?? 'mixed'), quantity = Number(p.quantity), cost = Number(p.cost ?? 0);
+    if (!['cow','goat','mixed'].includes(animalType) || !Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(cost) || cost < 0) throw new Error('Invalid feed record');
+    await client.query(`INSERT INTO feed_records(id,animal_type,quantity,unit,cost,supplier_id,record_date,notes,created_by,idempotency_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(id) DO NOTHING`, [id, animalType, quantity, String(p.unit ?? 'kg'), cost, p.supplierId ?? null, p.date ?? new Date().toISOString().slice(0,10), p.notes ?? null, userId, op.operationId]);
+    await client.query(`INSERT INTO audit_logs(user_id,action,entity_type,entity_id,after_data) VALUES($1,'create','feed_record',$2,$3)`, [userId, id, JSON.stringify(p)]);
+    return;
+  }
+
+  throw new Error(`Create sync for ${op.entityType} is not implemented`);
+}
+
+async function checkConflict(client: import('pg').PoolClient, table: string, id: string, payload: Record<string, any>) {
+  const base = payload.baseUpdatedAt;
+  if (!base) return;
+  const row = await client.query(`SELECT updated_at FROM ${table} WHERE id=$1`, [id]);
+  if (!row.rows[0]) throw new Error('Record not found');
+  if (new Date(String(row.rows[0].updated_at)).getTime() > new Date(String(base)).getTime()) throw new Error('Conflict: server record changed after the offline edit');
+}
+
+async function applyUpdate(client: import('pg').PoolClient, op: SyncOperation, _userId: string) {
+  const p = op.payload ?? {}, id = String(op.entityId ?? p.id ?? '');
+  if (!id) throw new Error('Update operation requires an entity id');
+  if (op.entityType === 'customer') {
+    await checkConflict(client, 'customers', id, p);
+    const fields: string[] = [], vals: any[] = [];
+    const add = (sql: string, v: any) => { fields.push(sql); vals.push(v); };
+    if (p.name != null) add('name=$' + (vals.length + 1), String(p.name).trim());
+    if (p.phone !== undefined) add('phone=$' + (vals.length + 1), p.phone);
+    if (p.address !== undefined) add('address=$' + (vals.length + 1), p.address);
+    if (p.notes !== undefined) add('notes=$' + (vals.length + 1), p.notes);
+    if (!fields.length) return;
+    vals.push(id);
+    await client.query(`UPDATE customers SET ${fields.join(',')},updated_at=NOW() WHERE id=$${vals.length}`, vals);
+    return;
+  }
+  if (op.entityType === 'variant') {
+    await checkConflict(client, 'product_variants', id, p);
+    const allowed = ['name','sku','barcode','retail_price','wholesale_price','production_cost','min_stock','min_order_qty','expiry_days','image_url'];
+    const map: any = { name:p.name, sku:p.sku, barcode:p.barcode, retail_price:p.retailPrice, wholesale_price:p.wholesalePrice, production_cost:p.productionCost ?? p.cost, min_stock:p.minStock, min_order_qty:p.minOrderQty, expiry_days:p.expiryDays, image_url:p.imageUrl ?? p.image };
+    const set: string[] = [], vals: any[] = [];
+    for (const key of allowed) if (map[key] !== undefined) { set.push(`${key}=$${vals.length+1}`); vals.push(map[key]); }
+    if (!set.length) return;
+    vals.push(id);
+    await client.query(`UPDATE product_variants SET ${set.join(',')},updated_at=NOW() WHERE id=$${vals.length}`, vals);
+    return;
+  }
+  throw new Error(`Update sync for ${op.entityType} is not implemented`);
+}
+
+async function applyDelete(client: import('pg').PoolClient, op: SyncOperation) {
+  const p = op.payload ?? {}, id = String(op.entityId ?? p.id ?? '');
+  if (!id) throw new Error('Delete operation requires an entity id');
+  if (op.entityType === 'customer') { await client.query(`UPDATE customers SET active=FALSE,updated_at=NOW() WHERE id=$1`, [id]); return; }
+  if (op.entityType === 'product') { await client.query(`UPDATE products SET active=FALSE,updated_at=NOW() WHERE id=$1`, [id]); return; }
+  if (op.entityType === 'variant') { await client.query(`UPDATE product_variants SET active=FALSE,updated_at=NOW() WHERE id=$1`, [id]); return; }
+  throw new Error('Financial or inventory records cannot be deleted through offline sync');
+}
+
+router.post('/push', async (req, res, next) => {
+  try {
+    const deviceId = String(req.body?.deviceId ?? '').trim();
+    const operations = Array.isArray(req.body?.operations) ? req.body.operations as SyncOperation[] : [];
+    if (!deviceId || !operations.length) return res.status(400).json({ error: 'deviceId and operations are required' });
+    const result = await transaction(async client => {
+      const accepted: string[] = [], duplicates: string[] = [], rejected: Array<{operationId:string;reason:string}> = [];
+      for (const op of operations) {
+        const id = String(op?.operationId ?? '').trim(), entity = String(op?.entityType ?? '').trim(), operationType = op.operationType ?? 'create';
+        if (!id || !allowedEntities.has(entity) || !['create','update','delete'].includes(operationType)) { rejected.push({ operationId:id, reason:'Unsupported or invalid operation' }); continue; }
+        await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [id]);
+        const existing = await client.query<{status:string}>('SELECT status FROM sync_operations WHERE operation_id=$1 FOR UPDATE', [id]);
+        if (existing.rows[0]?.status === 'applied') { duplicates.push(id); continue; }
+        if (existing.rows[0]?.status === 'rejected') await client.query('DELETE FROM sync_operations WHERE operation_id=$1', [id]);
+        try {
+          if (operationType === 'create') await applyCreate(client, op, req.user!.id);
+          else if (operationType === 'update') await applyUpdate(client, op, req.user!.id);
+          else await applyDelete(client, op);
+          await client.query(`INSERT INTO sync_operations(device_id,operation_id,entity_type,entity_id,operation_type,payload,status,applied_at) VALUES($1,$2,$3,$4,$5,$6,'applied',NOW())`, [deviceId,id,entity,op.entityId??op.payload?.id??null,operationType,JSON.stringify(op.payload??{})]);
+          accepted.push(id);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          rejected.push({ operationId:id, reason });
+          await client.query(`INSERT INTO sync_operations(device_id,operation_id,entity_type,entity_id,operation_type,payload,status) VALUES($1,$2,$3,$4,$5,$6,'rejected') ON CONFLICT(operation_id) DO UPDATE SET status='rejected',payload=EXCLUDED.payload,device_id=EXCLUDED.device_id`, [deviceId,id,entity,op.entityId??op.payload?.id??null,operationType,JSON.stringify(op.payload??{})]);
+        }
+      }
+      return { accepted, duplicates, rejected };
+    });
+    res.json(result);
+  } catch (e) { next(e); }
+});
+
+router.get('/pull', async (req, res, next) => {
+  try {
+    const rawSince = String(req.query.since ?? '1970-01-01T00:00:00.000Z'), deviceId = String(req.query.deviceId ?? '');
+    let sinceTime = rawSince, sinceOperationId = '';
+    const separator = rawSince.indexOf('|');
+    if (separator > 0) { sinceTime = rawSince.slice(0, separator); sinceOperationId = rawSince.slice(separator + 1); }
+    const r = await query<{created_at:string;operation_id:string}>(`SELECT operation_id,device_id,entity_type,entity_id,operation_type,payload,status,created_at,applied_at FROM sync_operations WHERE status='applied' AND ($2='' OR device_id<>$2) AND (created_at>$1 OR (created_at=$1 AND operation_id>$3)) ORDER BY created_at ASC, operation_id ASC LIMIT 500`, [sinceTime,deviceId,sinceOperationId]);
+    const nextSince = r.rows.length ? `${new Date(String(r.rows[r.rows.length-1].created_at)).toISOString()}|${String(r.rows[r.rows.length-1].operation_id)}` : rawSince;
+    res.json({ items:r.rows, nextSince });
+  } catch (e) { next(e); }
+});
+
+router.get('/status', async (req, res, next) => {
+  try {
+    const deviceId = String(req.query.deviceId ?? '');
+    const r = await query(`SELECT COUNT(*)::int AS total,COUNT(*) FILTER(WHERE status='pending')::int AS pending,COUNT(*) FILTER(WHERE status='rejected')::int AS rejected,MAX(created_at) AS last_operation FROM sync_operations WHERE ($1='' OR device_id=$1)`, [deviceId]);
+    res.json(r.rows[0]);
+  } catch (e) { next(e); }
+});
+
 export default router;
