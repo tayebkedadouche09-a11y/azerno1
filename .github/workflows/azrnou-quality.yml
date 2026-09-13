@@ -2,14 +2,14 @@ name: AZRNOU Quality Gate
 
 on:
   push:
-    branches: [azrnou-production]
+    branches: [azrnou-production, azrnou-p1-verify5, azrnou-p0-impl2]
   pull_request:
-    branches: [azrnou-production]
+    branches: [azrnou-production, azrnou-p1-verify5]
 
 jobs:
   quality:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16
@@ -27,17 +27,18 @@ jobs:
     env:
       DATABASE_URL: postgresql://azrnou:azrnou@localhost:5432/azrnou_test
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Install dependencies
+      - name: Install
         run: npm install --no-audit --no-fund
-      - name: Database migrations
+      - name: Migrations 001-023
         run: npm run db:migrate
-      - name: TypeScript check
+      - name: TypeScript
         run: npm run lint
+      - name: Integration tests
+        run: npx tsx --test server/__tests__/integration.test.ts
+        continue-on-error: false
       - name: Production build
         run: npm run build
