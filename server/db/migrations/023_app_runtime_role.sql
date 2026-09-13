@@ -8,7 +8,12 @@ BEGIN
   END IF;
 END $$;
 
-GRANT CONNECT ON DATABASE CURRENT_DATABASE() TO azrnou_app;
+-- GRANT CONNECT requires a concrete database name (CURRENT_DATABASE() is invalid syntax here)
+DO $$
+BEGIN
+  EXECUTE format('GRANT CONNECT ON DATABASE %I TO azrnou_app', current_database());
+END $$;
+
 GRANT USAGE ON SCHEMA public TO azrnou_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO azrnou_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO azrnou_app;
