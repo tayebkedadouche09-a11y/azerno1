@@ -38,7 +38,7 @@ jobs:
       - name: TypeScript
         run: npm run lint
       - name: Integration tests
-        run: npx tsx --test server/__tests__/integration.test.ts server/__tests__/idempotency.test.ts server/__tests__/api_idempotency.test.ts server/__tests__/offline_queue_contract.test.ts server/__tests__/payment_expense_idempotency.test.ts
+        run: npx tsx --test server/__tests__/integration.test.ts server/__tests__/idempotency.test.ts server/__tests__/api_idempotency.test.ts server/__tests__/offline_queue_contract.test.ts server/__tests__/payment_expense_idempotency.test.ts server/__tests__/intelligence_contract.test.ts
         continue-on-error: false
       - name: RLS proof SQL
         run: |

@@ -10,6 +10,8 @@ import financeRouter from './routes/finance.js';
 import productionRouter from './routes/production.js';
 import productionCompletionSyncRouter from './routes/productionCompletionSync.js';
 import reportsRouter from './routes/reports.js';
+import intelligenceRouter from './routes/intelligence.js';
+import backupRouter from './routes/backup.js';
 import syncRouter from './routes/sync.js';
 import healthRouter from './routes/health.js';
 
@@ -21,8 +23,6 @@ app.use(express.json({limit:'1mb'}));
 app.get('/api',(_req,res)=>res.json({name:'AZRNOU API',version:'1.3.0'}));
 app.use('/api/health',healthRouter);
 app.use('/api/auth',authRouter);
-// Mount the idempotent payment handler before the legacy business router.
-// The legacy /business/payments route remains as a compatibility fallback.
 app.use('/api/business',paymentsRouter);
 app.use('/api/business',businessRouter);
 app.use('/api/business-core',coreRouter);
@@ -32,6 +32,8 @@ app.use('/api/finance',financeRouter);
 app.use('/api/production',productionRouter);
 app.use('/api/production-sync',productionCompletionSyncRouter);
 app.use('/api/reports',reportsRouter);
+app.use('/api/intelligence',intelligenceRouter);
+app.use('/api/backup',backupRouter);
 app.use('/api/sync',syncRouter);
 app.use((error:unknown,_req:express.Request,res:express.Response,_next:express.NextFunction)=>{console.error('[AZRNOU API]',error);const message=error instanceof Error?error.message:'Internal server error';const status=/not found|insufficient|invalid|exceeds|already initialized|quantity|stock|required|negative|reserved/i.test(message)?400:500;res.status(status).json({error:status===500?'Internal server error':message});});
 app.listen(port,'0.0.0.0',()=>console.log(`[AZRNOU] API listening on :${port}`));
