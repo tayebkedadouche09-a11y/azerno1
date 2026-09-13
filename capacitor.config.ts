@@ -1,6 +1,5 @@
-import type { CapacitorConfig } from '@capacitor/cli';
-
-const config: CapacitorConfig = {
+/** Capacitor config — types optional until @capacitor/cli is installed for Android builds */
+const config = {
   appId: 'dz.azrnou.app',
   appName: 'AZRNOU',
   webDir: 'dist',
