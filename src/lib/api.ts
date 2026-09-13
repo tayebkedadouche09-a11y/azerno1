@@ -25,6 +25,7 @@ export const api={
  cashSummary:()=>request<Record<string,unknown>>('/finance/cash-summary'),
  productionBatches:()=>request<ApiList<Record<string,unknown>>>('/production/batches'),
  livestock:()=>request<ApiList<Record<string,unknown>>>('/production/livestock'),
+ feedRecords:()=>request<ApiList<Record<string,unknown>>>('/production/feed'),
  reportSummary:(start?:string,end?:string)=>request<Record<string,unknown>>(`/reports/summary?start=${encodeURIComponent(start??'1970-01-01')}&end=${encodeURIComponent(end??'2999-12-31')}`),
  lowStock:()=>request<ApiList<Record<string,unknown>>>('/reports/low-stock'),
  createCustomer:(payload:unknown)=>request('/business/customers',{method:'POST',body:JSON.stringify(payload)}),
