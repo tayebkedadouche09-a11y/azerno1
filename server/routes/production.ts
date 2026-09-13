@@ -14,7 +14,7 @@ async function nextNumber(client: import('pg').PoolClient) {
 
 router.get('/batches', async (_req, res, next) => {
   try {
-    const r = await query(`SELECT pb.*,p.name AS product_name,pv.name AS variant_name FROM production_batches pb LEFT JOIN products p ON p.id=pb.product_id LEFT JOIN product_variants pv ON pv.id=(SELECT id FROM product_variants WHERE product_id=pb.product_id ORDER BY created_at LIMIT 1) ORDER BY pb.created_at DESC`);
+    const r = await query(`SELECT pb.*,p.name AS product_name,pv.name AS variant_name FROM production_batches pb LEFT JOIN products p ON p.id=pb.product_id LEFT JOIN product_variants pv ON pv.id=pb.output_variant_id ORDER BY pb.created_at DESC`);
     res.json({ items: r.rows });
   } catch (e) { next(e); }
 });
@@ -36,12 +36,12 @@ router.post('/batches', requireRole('owner', 'manager', 'worker'), async (req, r
       if (!variant.rows[0]) throw Object.assign(new Error('Output variant not found'), { status: 404 });
       const number = await nextNumber(client);
       const status = String(req.body?.status ?? 'curing') === 'completed' ? 'completed' : 'curing';
-      const b = await client.query(`INSERT INTO production_batches(batch_number,product_id,milk_type,milk_input_liters,total_cost,output_quantity,cost_per_unit,expiry_date,status,notes,created_by,idempotency_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`, [number, variant.rows[0].product_id, req.body?.milkType ?? null, milk, cost, output, cost / output, req.body?.expiryDate ?? null, status, req.body?.notes ?? null, req.user!.id, idempotencyKey]);
+      const b = await client.query(`INSERT INTO production_batches(batch_number,product_id,output_variant_id,milk_type,milk_input_liters,total_cost,output_quantity,cost_per_unit,expiry_date,status,notes,created_by,idempotency_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`, [number, variant.rows[0].product_id, variantId, req.body?.milkType ?? null, milk, cost, output, cost / output, req.body?.expiryDate ?? null, status, req.body?.notes ?? null, req.user!.id, idempotencyKey]);
       if (status === 'completed') {
         await client.query(`INSERT INTO inventory_balances(variant_id,quantity,reserved_quantity) VALUES($1,$2,0) ON CONFLICT(variant_id) DO UPDATE SET quantity=inventory_balances.quantity+$2,updated_at=NOW()`, [variantId, output]);
         await client.query(`INSERT INTO inventory_movements(variant_id,movement_type,quantity,reference_type,reference_id,idempotency_key,created_by) VALUES($1,'production',$2,'production',$3,$4,$5) ON CONFLICT(idempotency_key) DO NOTHING`, [variantId, output, b.rows[0].id, `production:${b.rows[0].id}:${variantId}`, req.user!.id]);
       }
-      await client.query(`INSERT INTO audit_logs(user_id,action,entity_type,entity_id,after_data) VALUES($1,'create','production_batch',$2,$3)`, [req.user!.id, b.rows[0].id, JSON.stringify({ id: b.rows[0].id, batchNumber: number, status })]);
+      await client.query(`INSERT INTO audit_logs(user_id,action,entity_type,entity_id,after_data) VALUES($1,'create','production_batch',$2,$3)`, [req.user!.id, b.rows[0].id, JSON.stringify({ id: b.rows[0].id, batchNumber: number, status, outputVariantId: variantId })]);
       return b.rows[0];
     });
     res.status(201).json(result);
@@ -52,18 +52,21 @@ router.patch('/batches/:id/complete', requireRole('owner', 'manager', 'worker'),
   try {
     const result = await transaction(async client => {
       const completionKey = String(req.body?.idempotencyKey ?? req.header('Idempotency-Key') ?? '').trim() || null;
-      const batch = await client.query(`SELECT pb.*, pv.id AS variant_id FROM production_batches pb JOIN product_variants pv ON pv.product_id=pb.product_id AND pv.id=$2 WHERE pb.id=$1 FOR UPDATE`, [req.params.id, req.body?.outputVariantId]);
+      const requestedVariantId = String(req.body?.outputVariantId ?? '').trim() || null;
+      const batch = await client.query(`SELECT * FROM production_batches WHERE id=$1 FOR UPDATE`, [req.params.id]);
       if (!batch.rows[0]) throw Object.assign(new Error('Production batch not found'), { status: 404 });
       const b = batch.rows[0];
+      if (!b.output_variant_id) throw Object.assign(new Error('Production batch has no output variant'), { status: 409 });
+      if (requestedVariantId && requestedVariantId !== String(b.output_variant_id)) throw Object.assign(new Error('Output variant does not match the production batch'), { status: 409 });
       if (completionKey) {
         const existing = await client.query(`SELECT * FROM production_batches WHERE completion_idempotency_key=$1 FOR UPDATE`, [completionKey]);
         if (existing.rows[0]) return { ...b, status: 'completed' };
       }
       if (b.status === 'completed') return b;
       await client.query(`UPDATE production_batches SET status='completed',completion_idempotency_key=$2,updated_at=NOW() WHERE id=$1`, [req.params.id, completionKey]);
-      await client.query(`INSERT INTO inventory_balances(variant_id,quantity,reserved_quantity) VALUES($1,$2,0) ON CONFLICT(variant_id) DO UPDATE SET quantity=inventory_balances.quantity+$2,updated_at=NOW()`, [b.variant_id, b.output_quantity]);
-      await client.query(`INSERT INTO inventory_movements(variant_id,movement_type,quantity,reference_type,reference_id,idempotency_key,created_by) VALUES($1,'production',$2,'production',$3,$4,$5) ON CONFLICT(idempotency_key) DO NOTHING`, [b.variant_id, b.output_quantity, b.id, `production:${b.id}:${b.variant_id}`, req.user!.id]);
-      await client.query(`INSERT INTO audit_logs(user_id,action,entity_type,entity_id,before_data,after_data) VALUES($1,'update','production_batch',$2,$3,$4)`, [req.user!.id, b.id, JSON.stringify({ status: b.status }), JSON.stringify({ status: 'completed' })]);
+      await client.query(`INSERT INTO inventory_balances(variant_id,quantity,reserved_quantity) VALUES($1,$2,0) ON CONFLICT(variant_id) DO UPDATE SET quantity=inventory_balances.quantity+$2,updated_at=NOW()`, [b.output_variant_id, b.output_quantity]);
+      await client.query(`INSERT INTO inventory_movements(variant_id,movement_type,quantity,reference_type,reference_id,idempotency_key,created_by) VALUES($1,'production',$2,'production',$3,$4,$5) ON CONFLICT(idempotency_key) DO NOTHING`, [b.output_variant_id, b.output_quantity, b.id, `production:${b.id}:${b.output_variant_id}`, req.user!.id]);
+      await client.query(`INSERT INTO audit_logs(user_id,action,entity_type,entity_id,before_data,after_data) VALUES($1,'update','production_batch',$2,$3,$4)`, [req.user!.id, b.id, JSON.stringify({ status: b.status }), JSON.stringify({ status: 'completed', outputVariantId: b.output_variant_id })]);
       return { ...b, status: 'completed' };
     });
     res.json(result);
