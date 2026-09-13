@@ -33,8 +33,9 @@ async function flushQueueInternal() {
         offlineQueue.remove(operation.id); applied++; continue;
       }
       if (operation.entity === 'production_completion' && operation.action === 'create') {
-        const payload = operation.payload as { batchId:string; outputVariantId:string };
-        await api.completeProductionBatch(payload.batchId, payload.outputVariantId, operation.id);
+        const payload = operation.payload as { batchId?:string; outputVariantId?:string };
+        if (!payload?.batchId || !payload?.outputVariantId) throw new Error('Production completion payload is invalid');
+        await api.syncProductionCompletion(payload.batchId, payload.outputVariantId, operation.id);
         offlineQueue.remove(operation.id); applied++; continue;
       }
       const payload = operation.payload as { id?:string } | null;
