@@ -1,0 +1,22 @@
+-- Runtime application role that cannot bypass RLS
+-- Migrations/admin may still use azrnou superuser; app runtime should use azrnou_app
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'azrnou_app') THEN
+    CREATE ROLE azrnou_app LOGIN PASSWORD 'azrnou_app_pass' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+  END IF;
+END $$;
+
+GRANT CONNECT ON DATABASE azrnou TO azrnou_app;
+GRANT USAGE ON SCHEMA public TO azrnou_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO azrnou_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO azrnou_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO azrnou_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO azrnou_app;
+
+-- Ensure FORCE RLS remains
+ALTER TABLE customers FORCE ROW LEVEL SECURITY;
+ALTER TABLE orders FORCE ROW LEVEL SECURITY;
+ALTER TABLE payments FORCE ROW LEVEL SECURITY;
+ALTER TABLE product_variants FORCE ROW LEVEL SECURITY;
