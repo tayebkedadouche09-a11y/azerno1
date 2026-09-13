@@ -2,14 +2,14 @@ name: AZRNOU Quality Gate
 
 on:
   push:
-    branches: [azrnou-production]
+    branches: [azrnou-production, azrnou-p1-verify5, azrnou-p0-impl2]
   pull_request:
-    branches: [azrnou-production]
+    branches: [azrnou-production, azrnou-p1-verify5]
 
 jobs:
   quality:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16
@@ -27,17 +27,81 @@ jobs:
     env:
       DATABASE_URL: postgresql://azrnou:azrnou@localhost:5432/azrnou_test
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Install dependencies
+      - name: Install
         run: npm install --no-audit --no-fund
-      - name: Database migrations
+      - name: Migrations 001-026
         run: npm run db:migrate
-      - name: TypeScript check
+      - name: TypeScript
         run: npm run lint
+      - name: Integration tests
+        run: npx tsx --test server/__tests__/integration.test.ts server/__tests__/idempotency.test.ts server/__tests__/api_idempotency.test.ts server/__tests__/offline_queue_contract.test.ts server/__tests__/payment_expense_idempotency.test.ts server/__tests__/intelligence_contract.test.ts server/__tests__/backup_restore.test.ts server/__tests__/pwa_contract.test.ts
+        continue-on-error: false
+      - name: RLS proof SQL
+        run: |
+          PGPASSWORD=azrnou psql -h localhost -U azrnou -d azrnou_test -v ON_ERROR_STOP=1 -f server/__tests__/rls_proof.sql
+        continue-on-error: false
+      - name: RLS DML as azrnou_app
+        run: |
+          PGPASSWORD=azrnou psql -h localhost -U azrnou -d azrnou_test -v ON_ERROR_STOP=1 -f server/__tests__/rls_dml_as_app.sql
+        continue-on-error: false
       - name: Production build
         run: npm run build
+
+  browser-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: quality
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: azrnou
+          POSTGRES_PASSWORD: azrnou
+          POSTGRES_DB: azrnou_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U azrnou -d azrnou_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://azrnou:azrnou@localhost:5432/azrnou_test
+      JWT_SECRET: ci-e2e-jwt-secret-not-for-production
+      API_PORT: "4000"
+      VITE_API_URL: http://127.0.0.1:4000/api
+      PLAYWRIGHT_BASE_URL: http://127.0.0.1:4173
+      CI: "true"
+      E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
+      E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install deps + Playwright
+        run: |
+          npm install --no-audit --no-fund
+          npm install -D @playwright/test@1.49.0 --no-audit --no-fund
+          npx playwright install chromium --with-deps
+      - name: Migrate + optional E2E seed
+        run: |
+          npm run db:migrate
+          npx tsx server/seed-e2e.ts
+      - name: Start API
+        run: |
+          npx tsx server/index.ts &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:4000/api/health >/dev/null 2>&1 && break
+            curl -sf http://127.0.0.1:4000/api >/dev/null 2>&1 && break
+            sleep 1
+          done
+      - name: Production build
+        run: npm run build
+      - name: Browser E2E offline + PWA + auth (if secrets set)
+        run: |
+          npx playwright test e2e/auth-offline.spec.ts e2e/pwa-live.spec.ts e2e/auth-business-offline.spec.ts --config=playwright.config.ts

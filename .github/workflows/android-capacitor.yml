@@ -1,0 +1,32 @@
+name: Android Capacitor Path
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [azrnou-p1-verify5]
+    paths:
+      - 'capacitor.config.ts'
+      - 'android/**'
+      - '.github/workflows/android-capacitor.yml'
+
+jobs:
+  capacitor-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify Capacitor config
+        run: |
+          test -f capacitor.config.ts
+          grep -E "appId:|appName:|webDir:" capacitor.config.ts
+          grep -E "azrnou|AZRNOU" capacitor.config.ts
+      - name: Install + web build
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+      - name: Document APK absence without SDK
+        run: |
+          echo "Android SDK not on this runner — APK/AAB NOT generated."
+          echo "Local: npx cap add android && npx cap sync android && Android Studio Build APK"
