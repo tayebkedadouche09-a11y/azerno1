@@ -23,27 +23,23 @@ BEGIN
   INSERT INTO companies(name, slug) VALUES ('DML B', 'dml-b-' || substr(md5(random()::text),1,8)) RETURNING id INTO cb;
   INSERT INTO customers(name, company_id) VALUES ('A1', ca) RETURNING id INTO cust_a;
   INSERT INTO customers(name, company_id) VALUES ('B1', cb) RETURNING id INTO cust_b;
-  CREATE TEMP TABLE IF NOT EXISTS _rls_dml_ids (k text primary key, v uuid);
-  DELETE FROM _rls_dml_ids;
-  INSERT INTO _rls_dml_ids VALUES ('ca', ca), ('cb', cb), ('cust_a', cust_a), ('cust_b', cust_b);
+  PERFORM set_config('app.test_ca', ca::text, false);
+  PERFORM set_config('app.test_cb', cb::text, false);
+  PERFORM set_config('app.test_cust_a', cust_a::text, false);
+  PERFORM set_config('app.test_cust_b', cust_b::text, false);
 END $$;
 
 SET ROLE azrnou_app;
 
 DO $$
 DECLARE
-  ca UUID;
-  cb UUID;
-  cust_a UUID;
-  cust_b UUID;
+  ca UUID := current_setting('app.test_ca')::uuid;
+  cb UUID := current_setting('app.test_cb')::uuid;
+  cust_a UUID := current_setting('app.test_cust_a')::uuid;
+  cust_b UUID := current_setting('app.test_cust_b')::uuid;
   n int;
   new_id UUID;
 BEGIN
-  SELECT v INTO ca FROM _rls_dml_ids WHERE k = 'ca';
-  SELECT v INTO cb FROM _rls_dml_ids WHERE k = 'cb';
-  SELECT v INTO cust_a FROM _rls_dml_ids WHERE k = 'cust_a';
-  SELECT v INTO cust_b FROM _rls_dml_ids WHERE k = 'cust_b';
-
   PERFORM set_config('app.company_id', ca::text, true);
 
   SELECT COUNT(*) INTO n FROM customers WHERE id = cust_a;
@@ -61,8 +57,7 @@ BEGIN
   EXCEPTION
     WHEN insufficient_privilege OR check_violation OR not_null_violation THEN NULL;
     WHEN OTHERS THEN
-      IF SQLERRM ILIKE '%A INSERT into B%' THEN RAISE;
-      END IF;
+      IF SQLERRM ILIKE '%A INSERT into B%' THEN RAISE; END IF;
   END;
 
   UPDATE customers SET name = 'A1-updated' WHERE id = cust_a;
