@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { db } from './lib/storage';
 import { api, getAccessToken } from './lib/api';
 import { pullRemoteChanges, startCoreDataSync } from './lib/coreDataSync';
-import { DATA_CHANGED_EVENT } from './lib/dataRepository';
 import { bootstrapFinanceBridge } from './lib/financeBridge';
 import { AppLanguage, User } from './types';
 import { Header } from './components/layout/Header';
@@ -50,11 +49,7 @@ export default function App() {
   useEffect(() => { let active=true; const bootstrapSession=async()=>{ if(!getAccessToken()){if(active)setServerSessionReady(true);return;} try{const result=await api.me();if(!active)return;setCurrentUser({id:result.user.id,name:result.user.name,role:result.user.role,pin:'',active:true});}catch{await api.logout().catch(()=>undefined);}finally{if(active)setServerSessionReady(true);}};void bootstrapSession();return()=>{active=false;}; }, []);
   useEffect(() => { let active=true; void bootstrapFinanceBridge().finally(()=>{if(active)setFinanceReady(true);}); return()=>{active=false;}; }, []);
   useEffect(() => startCoreDataSync(() => setAppState({ ...db.getState() })), []);
-  useEffect(() => {
-    const refreshRemote = () => { if (navigator.onLine) void pullRemoteChanges(); };
-    const interval = window.setInterval(refreshRemote, 30000);
-    return () => window.clearInterval(interval);
-  }, []);
+  useEffect(() => { const refreshRemote = () => { if (navigator.onLine) void pullRemoteChanges(); }; const interval = window.setInterval(refreshRemote, 30000); return () => window.clearInterval(interval); }, []);
   useEffect(() => { const unsubscribe=db.subscribe(()=>{setAppState({...db.getState()});setCurrentUser(db.getCurrentUser());});return()=>unsubscribe(); }, []);
   useEffect(() => { const handleKeyDown=(e:KeyboardEvent)=>{if((e.ctrlKey||e.metaKey)&&e.key==='k'){e.preventDefault();setIsSearchOpen(p=>!p);}};window.addEventListener('keydown',handleKeyDown);return()=>window.removeEventListener('keydown',handleKeyDown); }, []);
 
