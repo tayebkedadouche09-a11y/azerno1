@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: azrnou
+          POSTGRES_PASSWORD: azrnou_dev_pass
+          POSTGRES_DB: azrnou
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://azrnou:azrnou_dev_pass@localhost:5432/azrnou
+      JWT_SECRET: ci_test_secret_not_for_production
+      NODE_ENV: test
+      PORT: 4000
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install
+        run: npm ci || npm install
+
+      - name: TypeScript frontend
+        run: npx tsc --noEmit
+
+      - name: TypeScript server
+        run: npx tsc -p server/tsconfig.json --noEmit
+
+      - name: Migrate all
+        run: npx tsx server/src/db/migrate.ts
+
+      - name: Seed
+        run: npx tsx server/src/db/seed.ts
+
+      - name: Backend tests
+        run: npx vitest run --config server/vitest.config.ts
+
+      - name: Frontend production build
+        run: npm run build
+        env:
+          VITE_API_URL: http://localhost:4000/api
