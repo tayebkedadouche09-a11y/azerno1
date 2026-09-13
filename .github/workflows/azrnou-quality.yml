@@ -38,11 +38,15 @@ jobs:
       - name: TypeScript
         run: npm run lint
       - name: Integration tests
-        run: npx tsx --test server/__tests__/integration.test.ts server/__tests__/idempotency.test.ts
+        run: npx tsx --test server/__tests__/integration.test.ts server/__tests__/idempotency.test.ts server/__tests__/api_idempotency.test.ts
         continue-on-error: false
       - name: RLS proof SQL
         run: |
           PGPASSWORD=azrnou psql -h localhost -U azrnou -d azrnou_test -v ON_ERROR_STOP=1 -f server/__tests__/rls_proof.sql
+        continue-on-error: false
+      - name: RLS DML as azrnou_app
+        run: |
+          PGPASSWORD=azrnou psql -h localhost -U azrnou -d azrnou_test -v ON_ERROR_STOP=1 -f server/__tests__/rls_dml_as_app.sql
         continue-on-error: false
       - name: Production build
         run: npm run build
