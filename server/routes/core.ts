@@ -5,7 +5,47 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 const router = Router();
 router.use(requireAuth);
 
+const DEFAULT_COMPANY_SETTINGS = {
+  name: 'AZRNOU Entreprise',
+  slogan: '',
+  phone: '',
+  phoneSecondary: '',
+  address: '',
+  wilaya: '',
+  email: '',
+  nif: '',
+  nis: '',
+  rc: '',
+  rib: '',
+  currency: 'DZD / DA',
+  documentPrefixes: {},
+  documentCounters: {},
+  defaultTerms: '',
+  whatsappMessageTemplate: '',
+};
+
 router.get('/categories', async (_req, res, next) => { try { const result = await query(`SELECT id, name, name_ar, active FROM product_categories WHERE active = TRUE ORDER BY name`); res.json({ items: result.rows }); } catch (error) { next(error); } });
+
+router.get('/company-settings', async (req, res, next) => {
+  try {
+    const result = await query<{ value: Record<string, unknown> }>(`SELECT value FROM app_settings WHERE company_id=$1 AND key='company_profile' LIMIT 1`, [req.user!.companyId]);
+    res.json({ settings: { ...DEFAULT_COMPANY_SETTINGS, ...(result.rows[0]?.value ?? {}) } });
+  } catch (error) { next(error); }
+});
+
+router.patch('/company-settings', requireRole('owner', 'manager'), async (req, res, next) => {
+  try {
+    const incoming = req.body?.settings && typeof req.body.settings === 'object' ? req.body.settings : req.body;
+    if (!incoming || typeof incoming !== 'object') return res.status(400).json({ error: 'Settings object is required' });
+    const result = await query<{ value: Record<string, unknown> }>(
+      `INSERT INTO app_settings(company_id,key,value) VALUES($1,'company_profile',$2::jsonb)
+       ON CONFLICT(company_id,key) DO UPDATE SET value=app_settings.value || EXCLUDED.value,updated_at=NOW()
+       RETURNING value`,
+      [req.user!.companyId, JSON.stringify(incoming)]
+    );
+    res.json({ settings: { ...DEFAULT_COMPANY_SETTINGS, ...(result.rows[0]?.value ?? {}) } });
+  } catch (error) { next(error); }
+});
 
 router.patch('/variants/:id', requireRole('owner', 'manager'), async (req, res, next) => {
   try {
